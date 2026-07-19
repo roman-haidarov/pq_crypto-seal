@@ -12,49 +12,18 @@ require "pq_crypto/seal/io"
 
 module PQCrypto
   module Seal
+    IO_DELEGATES = %i[
+      encrypt_io decrypt_io encrypt_frame_io decrypt_frame_io
+      encrypt_file decrypt_file rebuild_recipients_file
+      add_recipient_file drop_recipient_stanza_file rotate_dek_file
+      inspect_file
+    ].freeze
+
     class << self
-      def encrypt_io(*args, **kwargs)
-        IOAPI.encrypt_io(*args, **kwargs)
-      end
-
-      def decrypt_io(*args, **kwargs)
-        IOAPI.decrypt_io(*args, **kwargs)
-      end
-
-      def encrypt_frame_io(*args, **kwargs)
-        IOAPI.encrypt_frame_io(*args, **kwargs)
-      end
-
-      def decrypt_frame_io(*args, **kwargs)
-        IOAPI.decrypt_frame_io(*args, **kwargs)
-      end
-
-      def encrypt_file(*args, **kwargs)
-        IOAPI.encrypt_file(*args, **kwargs)
-      end
-
-      def decrypt_file(*args, **kwargs)
-        IOAPI.decrypt_file(*args, **kwargs)
-      end
-
-      def rebuild_recipients_file(*args, **kwargs)
-        IOAPI.rebuild_recipients_file(*args, **kwargs)
-      end
-
-      def add_recipient_file(*args, **kwargs)
-        IOAPI.add_recipient_file(*args, **kwargs)
-      end
-
-      def drop_recipient_stanza_file(*args, **kwargs)
-        IOAPI.drop_recipient_stanza_file(*args, **kwargs)
-      end
-
-      def rotate_dek_file(*args, **kwargs)
-        IOAPI.rotate_dek_file(*args, **kwargs)
-      end
-
-      def inspect_file(*args, **kwargs)
-        IOAPI.inspect_file(*args, **kwargs)
+      IO_DELEGATES.each do |name|
+        define_method(name) do |*args, **kwargs|
+          IOAPI.public_send(name, *args, **kwargs)
+        end
       end
     end
 

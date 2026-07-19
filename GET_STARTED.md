@@ -14,7 +14,7 @@ bundle exec rake clean compile
 ```ruby
 require "pq_crypto/seal"
 
-recipient = PQCrypto::HybridKEM.generate
+recipient = PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)
 envelope = PQCrypto::Seal.encrypt("secret bytes", to: recipient.public_key)
 plaintext = PQCrypto::Seal.decrypt(envelope, with: recipient)
 ```

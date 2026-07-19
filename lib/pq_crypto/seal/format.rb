@@ -11,10 +11,22 @@ module PQCrypto
       FLAGS = 0
       INNER_VERSION = 1
       INNER_FLAGS = 0
+
       PADDING_NONE = 0
       PADDING_PADME = 1
       PADDING_FIXED = 2
       PADDING_BUCKETS = 3
+      PADDING_POLICY_IDS = {
+        PADDING_NONE => true,
+        PADDING_PADME => true,
+        PADDING_FIXED => true,
+        PADDING_BUCKETS => true
+      }.freeze
+      PADDING_POLICY_BY_SYMBOL = {
+        nil => PADDING_NONE,
+        :none => PADDING_NONE,
+        :padme => PADDING_PADME
+      }.freeze
 
       PAYLOAD_ID_BYTES = 32
       NONCE_BYTES = 32
@@ -25,7 +37,6 @@ module PQCrypto
       XWING_PUBLIC_KEY_BYTES = 1216
       XWING_CIPHERTEXT_BYTES = 1120
       XWING_SHARED_SECRET_BYTES = 32
-      XWING_SECRET_KEY_BYTES = 32
 
       DEK_BYTES = 32
       STANZA_BYTES = HINT_BYTES + XWING_CIPHERTEXT_BYTES + NONCE_BYTES + DEK_BYTES + TAG_BYTES
@@ -39,7 +50,7 @@ module PQCrypto
       MAX_PRIVATE_METADATA_BYTES = 16 * 1024 * 1024
       MAX_HEADER_BYTES = 2 * 1024 * 1024
 
-      DEFAULT_MAX_PLAINTEXT_BYTES = 1 * 1024 * 1024 * 1024 # 1 GiB
+      DEFAULT_MAX_PLAINTEXT_BYTES = 1 * 1024 * 1024 * 1024
       DEFAULT_MAX_STAGING_BYTES = DEFAULT_MAX_PLAINTEXT_BYTES + MAX_PRIVATE_METADATA_BYTES + 64
       DEFAULT_MAX_ENVELOPE_BYTES =
         MAX_HEADER_BYTES +
@@ -47,31 +58,43 @@ module PQCrypto
         DEFAULT_MAX_STAGING_BYTES +
         TAG_BYTES
 
+      LIMIT_DEFAULTS = {
+        max_staging_bytes: DEFAULT_MAX_STAGING_BYTES,
+        max_plaintext_bytes: DEFAULT_MAX_PLAINTEXT_BYTES,
+        max_envelope_bytes: DEFAULT_MAX_ENVELOPE_BYTES
+      }.freeze
+
       Header = Struct.new(
         :raw, :content_suite_id, :lookup_mode, :flags, :padding_policy_id,
         :payload_id, :payload_nonce, :recipient_capacity, :slot_size,
         :padded_inner_length, :public_metadata,
         keyword_init: true
       )
-
       Section = Struct.new(:wrap_suite_id, :section_id, :raw, :slots_offset, :slots_length, keyword_init: true)
+
+      SLOT_FIELDS = [
+        [:hint, HINT_BYTES],
+        [:kem_ciphertext, XWING_CIPHERTEXT_BYTES],
+        [:wrap_nonce, NONCE_BYTES],
+        [:wrapped_dek, DEK_BYTES],
+        [:wrap_tag, TAG_BYTES]
+      ].freeze
 
       module_function
 
-      def validate_slot_size!(slot_size)
+      def validate_slot_size!(slot_size, error: InvalidConfigurationError)
         n = Integer(slot_size)
         unless n.between?(MIN_SLOT_SIZE, MAX_SLOT_SIZE) && (n % SLOT_GRANULARITY).zero?
-          raise InvalidConfigurationError,
-                "slot_size must be #{MIN_SLOT_SIZE}..#{MAX_SLOT_SIZE} and divisible by #{SLOT_GRANULARITY}"
+          raise error, "slot_size must be #{MIN_SLOT_SIZE}..#{MAX_SLOT_SIZE} and divisible by #{SLOT_GRANULARITY}"
         end
-        raise InvalidConfigurationError, "slot_size is too small for current wrap suite" if n < STANZA_BYTES
+        raise error, "slot_size is too small for current wrap suite" if n < STANZA_BYTES
         n
       end
 
-      def validate_capacity!(capacity, recipient_count = nil)
+      def validate_capacity!(capacity, recipient_count = nil, error: InvalidConfigurationError)
         n = Integer(capacity)
         unless n.between?(1, MAX_RECIPIENT_CAPACITY)
-          raise InvalidConfigurationError, "recipient_capacity must be 1..#{MAX_RECIPIENT_CAPACITY}"
+          raise error, "recipient_capacity must be 1..#{MAX_RECIPIENT_CAPACITY}"
         end
         if recipient_count && recipient_count > n
           raise RecipientCapacityExceeded, "#{recipient_count} recipients do not fit capacity #{n}"
@@ -80,45 +103,28 @@ module PQCrypto
       end
 
       def validate_slot_size_from_wire!(slot_size)
-        n = Integer(slot_size)
-        unless n.between?(MIN_SLOT_SIZE, MAX_SLOT_SIZE) && (n % SLOT_GRANULARITY).zero?
-          raise FormatError,
-                "slot_size must be #{MIN_SLOT_SIZE}..#{MAX_SLOT_SIZE} and divisible by #{SLOT_GRANULARITY}"
-        end
-        raise FormatError, "slot_size is too small for current wrap suite" if n < STANZA_BYTES
-        n
+        validate_slot_size!(slot_size, error: FormatError)
       end
 
       def validate_capacity_from_wire!(capacity)
-        n = Integer(capacity)
-        unless n.between?(1, MAX_RECIPIENT_CAPACITY)
-          raise FormatError, "recipient_capacity must be 1..#{MAX_RECIPIENT_CAPACITY}"
-        end
-        n
+        validate_capacity!(capacity, error: FormatError)
       end
 
       def validate_padding_policy_id!(policy_id)
         n = Integer(policy_id)
-        unless [PADDING_NONE, PADDING_PADME, PADDING_FIXED, PADDING_BUCKETS].include?(n)
-          raise FormatError, "unsupported padding policy id #{n}"
-        end
+        raise FormatError, "unsupported padding policy id #{n}" unless PADDING_POLICY_IDS.key?(n)
         n
       end
 
       def padding_policy_id_for(policy)
+        return PADDING_POLICY_BY_SYMBOL.fetch(policy) if PADDING_POLICY_BY_SYMBOL.key?(policy)
         case policy
-        when nil, :none then PADDING_NONE
-        when :padme then PADDING_PADME
         when :preserve
           raise InvalidConfigurationError, "padding: :preserve is only valid for rotate_dek"
         when Hash
-          if policy.key?(:to)
-            PADDING_FIXED
-          elsif policy.key?(:buckets)
-            PADDING_BUCKETS
-          else
-            raise InvalidConfigurationError, "padding hash must contain :to or :buckets"
-          end
+          return PADDING_FIXED if policy.key?(:to)
+          return PADDING_BUCKETS if policy.key?(:buckets)
+          raise InvalidConfigurationError, "padding hash must contain :to or :buckets"
         else
           raise InvalidConfigurationError, "unsupported padding policy: #{policy.inspect}"
         end
@@ -199,6 +205,17 @@ module PQCrypto
         2 + SECTION_ID_BYTES + Integer(capacity) * Integer(slot_size)
       end
 
+      def split_slot(slot, slot_size)
+        fields = {}
+        offset = 0
+        SLOT_FIELDS.each do |name, length|
+          fields[name] = slot.byteslice(offset, length)
+          offset += length
+        end
+        fields[:padding] = slot.byteslice(offset, slot_size - offset)
+        fields
+      end
+
       def parse_section(bytes, offset, header)
         length = section_length(header)
         raw, = Binary.read_bytes(bytes, offset, length)
@@ -207,8 +224,10 @@ module PQCrypto
         unless wrap_suite == WRAP_SUITE_MLKEM768_X25519_AEGIS256
           raise UnsupportedSuiteError, "unsupported wrap suite #{wrap_suite}"
         end
-        Section.new(wrap_suite_id: wrap_suite, section_id: section_id, raw: raw, slots_offset: slot_offset,
-                    slots_length: raw.bytesize - slot_offset)
+        Section.new(
+          wrap_suite_id: wrap_suite, section_id: section_id, raw: raw,
+          slots_offset: slot_offset, slots_length: raw.bytesize - slot_offset
+        )
       end
 
       def inner_prefix(content_length, private_metadata_length)
@@ -233,18 +252,23 @@ module PQCrypto
 
       def check_resource_limits!(padded_inner_length:, envelope_bytes: nil,
                                  max_staging_bytes: DEFAULT_MAX_STAGING_BYTES,
-                                 max_plaintext_bytes: DEFAULT_MAX_PLAINTEXT_BYTES,
                                  max_envelope_bytes: DEFAULT_MAX_ENVELOPE_BYTES)
         if padded_inner_length > Integer(max_staging_bytes)
           raise ResourceLimitError,
                 "padded_inner_length #{padded_inner_length} exceeds max_staging_bytes #{max_staging_bytes}"
         end
-
         if envelope_bytes && envelope_bytes > Integer(max_envelope_bytes)
           raise ResourceLimitError,
                 "envelope #{envelope_bytes} exceeds max_envelope_bytes #{max_envelope_bytes}"
         end
         true
+      end
+
+      def pre_auth_limits(limits)
+        {
+          max_staging_bytes: limits.fetch(:max_staging_bytes, DEFAULT_MAX_STAGING_BYTES),
+          max_envelope_bytes: limits.fetch(:max_envelope_bytes, DEFAULT_MAX_ENVELOPE_BYTES)
+        }
       end
     end
   end

@@ -3,14 +3,32 @@
 module PQCrypto
   module Seal
     Opened = Struct.new(:data, :metadata, :public_metadata, :payload_id, :content_suite_id, :wrap_suite_id,
-                        :padding_policy_id, keyword_init: true)
+                        :padding_policy_id, keyword_init: true) do
+      def self.from_header(header, section, data:, metadata:)
+        new(
+          data: data, metadata: metadata, public_metadata: header.public_metadata,
+          payload_id: header.payload_id, content_suite_id: header.content_suite_id,
+          wrap_suite_id: section.wrap_suite_id, padding_policy_id: header.padding_policy_id
+        )
+      end
+    end
+
     Inspection = Struct.new(:payload_id, :public_metadata, :recipient_capacity, :slot_size,
                             :padded_inner_length, :content_suite_id, :wrap_suite_id,
-                            :padding_policy_id, :envelope_bytes, keyword_init: true)
+                            :padding_policy_id, :envelope_bytes, keyword_init: true) do
+      def self.from_header(header, section, envelope_bytes:)
+        new(
+          payload_id: header.payload_id, public_metadata: header.public_metadata,
+          recipient_capacity: header.recipient_capacity, slot_size: header.slot_size,
+          padded_inner_length: header.padded_inner_length,
+          content_suite_id: header.content_suite_id, wrap_suite_id: section.wrap_suite_id,
+          padding_policy_id: header.padding_policy_id, envelope_bytes: envelope_bytes
+        )
+      end
+    end
     Credentials = Struct.new(:secret_key, :public_key, keyword_init: true)
 
     WRAP_KEM_ALGORITHM = :ml_kem_768_x25519_xwing
-
     HINT_DOMAIN = "PQC-SEAL-V1-RECIPIENT-HINT\0".b
     WRAP_KEY_DOMAIN = "PQC-SEAL-V1-WRAP-KEY\0".b
     WRAP_AD_DOMAIN = "PQC-SEAL-V1-WRAP-AD\0".b
@@ -32,93 +50,48 @@ module PQCrypto
       recipients = normalize_public_keys(to)
       capacity = Format.validate_capacity!(recipient_capacity, recipients.length)
       slot_size = Format.validate_slot_size!(slot_size)
-      padding_policy_id = Format.padding_policy_id_for(padding)
 
-      payload_id = Native.random_bytes(Format::PAYLOAD_ID_BYTES)
-      payload_nonce = Native.random_bytes(Format::NONCE_BYTES)
-      dek = Native.random_bytes(Format::DEK_BYTES)
-      inner_prefix = Format.inner_prefix(data.bytesize, metadata.bytesize)
-      raw_inner_length = inner_prefix.bytesize + metadata.bytesize + data.bytesize
-
-      header_placeholder = Format.build_header(
-        payload_id: payload_id, payload_nonce: payload_nonce,
-        recipient_capacity: capacity, slot_size: slot_size,
-        padded_inner_length: raw_inner_length, public_metadata: public_metadata,
-        padding_policy_id: padding_policy_id
-      )
-      fixed_without_inner = header_placeholder.bytesize + Format.section_length_for(capacity, slot_size) + Format::TAG_BYTES
-      target = Padding.target(fixed_without_inner + raw_inner_length, padding)
-      padded_inner_length = target - fixed_without_inner
-      raise InvalidConfigurationError, "invalid padding target" if padded_inner_length < raw_inner_length
-
-      header = Format.build_header(
-        payload_id: payload_id, payload_nonce: payload_nonce,
-        recipient_capacity: capacity, slot_size: slot_size,
-        padded_inner_length: padded_inner_length, public_metadata: public_metadata,
-        padding_policy_id: padding_policy_id
-      )
-      header_hash = Native.sha256(header)
-      section = build_recipient_section(
+      parts = nil
+      pad_bytes = nil
+      inner = nil
+      parts = materialize_crypto_parts(
         recipients: recipients, capacity: capacity, slot_size: slot_size,
-        payload_id: payload_id, header_hash: header_hash, dek: dek,
-        wrap_suite_id: Format::WRAP_SUITE_MLKEM768_X25519_AEGIS256
+        padding: padding, public_metadata: public_metadata,
+        content_size: data.bytesize, metadata_size: metadata.bytesize
       )
-      pad_length = padded_inner_length - raw_inner_length
-      pad_bytes = Native.random_bytes(pad_length)
-      inner = inner_prefix + metadata + data + pad_bytes
-      ciphertext, tag = Native.aegis256_encrypt(dek, payload_nonce, header_hash, inner)
-      header + section + ciphertext + tag
+      pad_bytes = Native.random_bytes(parts[:padded_inner_length] - parts[:raw_inner_length])
+      inner = parts[:inner_prefix] + metadata + data + pad_bytes
+      ciphertext, tag = Native.aegis256_encrypt(parts[:dek], parts[:payload_nonce], parts[:header_hash], inner)
+      parts[:header] + parts[:section] + ciphertext + tag
     ensure
-      wipe_string!(dek) if defined?(dek)
-      wipe_string!(inner) if defined?(inner)
-      wipe_string!(pad_bytes) if defined?(pad_bytes)
-      wipe_string!(metadata) if defined?(metadata) && metadata.is_a?(String) && !metadata.frozen?
+      wipe_string!(parts[:dek]) if parts
+      wipe_string!(inner)
+      wipe_string!(pad_bytes)
+      wipe_string!(metadata) if metadata.is_a?(String) && !metadata.frozen?
+      wipe_string!(data) if data.is_a?(String) && !data.frozen?
     end
 
-    def decrypt(envelope, with:,
-                max_staging_bytes: Format::DEFAULT_MAX_STAGING_BYTES,
-                max_plaintext_bytes: Format::DEFAULT_MAX_PLAINTEXT_BYTES,
-                max_envelope_bytes: Format::DEFAULT_MAX_ENVELOPE_BYTES)
-      open(envelope, with: with,
-           max_staging_bytes: max_staging_bytes,
-           max_plaintext_bytes: max_plaintext_bytes,
-           max_envelope_bytes: max_envelope_bytes).data
+    def decrypt(envelope, with:, **limits)
+      open(envelope, with: with, **limits).data
     end
 
-    def open(envelope, with:,
-             max_staging_bytes: Format::DEFAULT_MAX_STAGING_BYTES,
-             max_plaintext_bytes: Format::DEFAULT_MAX_PLAINTEXT_BYTES,
-             max_envelope_bytes: Format::DEFAULT_MAX_ENVELOPE_BYTES)
+    def open(envelope, with:, **limits)
+      limits = Format::LIMIT_DEFAULTS.merge(limits)
       bytes = String(envelope).b
       Format.check_resource_limits!(
-        padded_inner_length: 0, envelope_bytes: bytes.bytesize,
-        max_staging_bytes: max_staging_bytes,
-        max_plaintext_bytes: max_plaintext_bytes,
-        max_envelope_bytes: max_envelope_bytes
+        padded_inner_length: 0, envelope_bytes: bytes.bytesize, **Format.pre_auth_limits(limits)
       )
       header, section, ciphertext, tag = parse_envelope(bytes)
       Format.check_resource_limits!(
         padded_inner_length: header.padded_inner_length,
-        envelope_bytes: bytes.bytesize,
-        max_staging_bytes: max_staging_bytes,
-        max_plaintext_bytes: max_plaintext_bytes,
-        max_envelope_bytes: max_envelope_bytes
+        envelope_bytes: bytes.bytesize, **Format.pre_auth_limits(limits)
       )
       dek = unwrap_dek(header, section, with)
       header_hash = Native.sha256(header.raw)
       inner = Native.aegis256_decrypt(dek, header.payload_nonce, header_hash, ciphertext, tag)
       content, metadata, = Format.parse_verified_inner(inner)
-      if content.bytesize > Integer(max_plaintext_bytes)
-        wipe_string!(content)
-        wipe_string!(metadata)
-        raise ResourceLimitError,
-              "plaintext #{content.bytesize} exceeds max_plaintext_bytes #{max_plaintext_bytes}"
-      end
-      Opened.new(
-        data: content, metadata: metadata, public_metadata: header.public_metadata,
-        payload_id: header.payload_id, content_suite_id: header.content_suite_id,
-        wrap_suite_id: section.wrap_suite_id, padding_policy_id: header.padding_policy_id
-      )
+      enforce_plaintext_limit!(content, metadata, limits[:max_plaintext_bytes])
+      Opened.from_header(header, section, data: content, metadata: metadata)
     ensure
       wipe_string!(dek) if defined?(dek)
       wipe_string!(inner) if defined?(inner)
@@ -127,22 +100,13 @@ module PQCrypto
     def inspect_envelope(envelope)
       bytes = String(envelope).b
       header, section, = parse_envelope(bytes)
-      Inspection.new(
-        payload_id: header.payload_id, public_metadata: header.public_metadata,
-        recipient_capacity: header.recipient_capacity, slot_size: header.slot_size,
-        padded_inner_length: header.padded_inner_length,
-        content_suite_id: header.content_suite_id, wrap_suite_id: section.wrap_suite_id,
-        padding_policy_id: header.padding_policy_id,
-        envelope_bytes: bytes.bytesize
-      )
+      Inspection.from_header(header, section, envelope_bytes: bytes.bytesize)
     end
 
     def digest(envelope)
       Native.sha256(String(envelope).b)
     end
 
-    # Rebuilds every real and dummy stanza while leaving the encrypted payload untouched.
-    # The caller must provide the complete authoritative recipient list.
     def rebuild_recipients(envelope, with:, recipients:)
       bytes = String(envelope).b
       header, section, ciphertext, tag = parse_envelope(bytes)
@@ -162,10 +126,7 @@ module PQCrypto
     end
 
     def add_recipient(envelope, with:, recipient:, current_recipients:)
-      rebuild_recipients(
-        envelope, with: with,
-        recipients: Array(current_recipients) + [recipient]
-      )
+      rebuild_recipients(envelope, with: with, recipients: Array(current_recipients) + [recipient])
     end
 
     def drop_recipient_stanza(envelope, with:, remaining_recipients:)
@@ -174,20 +135,71 @@ module PQCrypto
 
     def rotate_dek(envelope, with:, recipients:, padding: :preserve)
       bytes = String(envelope).b
-      opened = open(bytes, with: with)
-      info = inspect_envelope(bytes)
-      padding = { to: info.envelope_bytes } if padding == :preserve
+      header, section, ciphertext, tag = parse_envelope(bytes)
+      dek = unwrap_dek(header, section, with)
+      header_hash = Native.sha256(header.raw)
+      inner = Native.aegis256_decrypt(dek, header.payload_nonce, header_hash, ciphertext, tag)
+      content, metadata, = Format.parse_verified_inner(inner)
+      padding = { to: bytes.bytesize } if padding == :preserve
       encrypt(
-        opened.data, to: recipients, metadata: opened.metadata,
-        public_metadata: opened.public_metadata,
-        recipient_capacity: info.recipient_capacity,
-        slot_size: info.slot_size, padding: padding
+        content, to: recipients, metadata: metadata,
+        public_metadata: header.public_metadata,
+        recipient_capacity: header.recipient_capacity,
+        slot_size: header.slot_size, padding: padding
       )
     ensure
-      if defined?(opened) && opened
-        wipe_string!(opened.data)
-        wipe_string!(opened.metadata)
-      end
+      wipe_string!(dek) if defined?(dek)
+      wipe_string!(inner) if defined?(inner)
+      wipe_string!(content) if defined?(content)
+      wipe_string!(metadata) if defined?(metadata)
+    end
+
+    def materialize_crypto_parts(recipients:, capacity:, slot_size:, padding:, public_metadata:,
+                                 content_size:, metadata_size:)
+      padding_policy_id = Format.padding_policy_id_for(padding)
+      payload_id = Native.random_bytes(Format::PAYLOAD_ID_BYTES)
+      payload_nonce = Native.random_bytes(Format::NONCE_BYTES)
+      dek = Native.random_bytes(Format::DEK_BYTES)
+      inner_prefix = Format.inner_prefix(content_size, metadata_size)
+      raw_inner_length = inner_prefix.bytesize + metadata_size + content_size
+
+      placeholder = Format.build_header(
+        payload_id: payload_id, payload_nonce: payload_nonce,
+        recipient_capacity: capacity, slot_size: slot_size,
+        padded_inner_length: raw_inner_length, public_metadata: public_metadata,
+        padding_policy_id: padding_policy_id
+      )
+      fixed = placeholder.bytesize + Format.section_length_for(capacity, slot_size) + Format::TAG_BYTES
+      target = Padding.target(fixed + raw_inner_length, padding)
+      padded_inner_length = target - fixed
+      raise InvalidConfigurationError, "invalid padding target" if padded_inner_length < raw_inner_length
+
+      header = Format.build_header(
+        payload_id: payload_id, payload_nonce: payload_nonce,
+        recipient_capacity: capacity, slot_size: slot_size,
+        padded_inner_length: padded_inner_length, public_metadata: public_metadata,
+        padding_policy_id: padding_policy_id
+      )
+      header_hash = Native.sha256(header)
+      section = build_recipient_section(
+        recipients: recipients, capacity: capacity, slot_size: slot_size,
+        payload_id: payload_id, header_hash: header_hash, dek: dek,
+        wrap_suite_id: Format::WRAP_SUITE_MLKEM768_X25519_AEGIS256
+      )
+      {
+        header: header, section: section, dek: dek, payload_id: payload_id,
+        payload_nonce: payload_nonce, header_hash: header_hash,
+        inner_prefix: inner_prefix, raw_inner_length: raw_inner_length,
+        padded_inner_length: padded_inner_length
+      }
+    end
+
+    def enforce_plaintext_limit!(content, metadata, max_plaintext_bytes)
+      return if content.bytesize <= Integer(max_plaintext_bytes)
+      wipe_string!(content)
+      wipe_string!(metadata)
+      raise ResourceLimitError,
+            "plaintext #{content.bytesize} exceeds max_plaintext_bytes #{max_plaintext_bytes}"
     end
 
     def verify_payload!(header, ciphertext, tag, dek)
@@ -213,22 +225,22 @@ module PQCrypto
 
     def build_recipient_section(recipients:, capacity:, slot_size:, payload_id:, header_hash:, dek:, wrap_suite_id:)
       section_id = Native.random_bytes(Format::SECTION_ID_BYTES)
-      real_slots = recipients.each_with_index.map do |public_key, index|
+      slots = recipients.each_with_index.map do |public_key, index|
         build_slot(public_key, index, slot_size, payload_id, section_id, header_hash, dek, wrap_suite_id)
       end
-      (real_slots.length...capacity).each do |index|
+      (slots.length...capacity).each do |index|
         dummy_pair = nil
         dummy_dek = nil
         begin
           dummy_pair = PQCrypto::HybridKEM.generate(WRAP_KEM_ALGORITHM)
           dummy_dek = Native.random_bytes(Format::DEK_BYTES)
-          real_slots << build_slot(dummy_pair.public_key, index, slot_size, payload_id, section_id, header_hash, dummy_dek, wrap_suite_id)
+          slots << build_slot(dummy_pair.public_key, index, slot_size, payload_id, section_id, header_hash, dummy_dek, wrap_suite_id)
         ensure
           dummy_pair.secret_key.wipe! if dummy_pair && dummy_pair.secret_key.respond_to?(:wipe!)
           wipe_string!(dummy_dek)
         end
       end
-      Binary.u16(wrap_suite_id) + section_id + real_slots.join
+      Binary.u16(wrap_suite_id) + section_id + slots.join
     end
 
     def build_slot(public_key, index, slot_size, payload_id, section_id, header_hash, dek, wrap_suite_id)
@@ -260,19 +272,13 @@ module PQCrypto
         next unless secure_equal?(hint, expected_hint)
 
         begin
-          offset = Format::HINT_BYTES
-          kem_ct = slot.byteslice(offset, Format::XWING_CIPHERTEXT_BYTES); offset += Format::XWING_CIPHERTEXT_BYTES
-          nonce = slot.byteslice(offset, Format::NONCE_BYTES); offset += Format::NONCE_BYTES
-          wrapped = slot.byteslice(offset, Format::DEK_BYTES); offset += Format::DEK_BYTES
-          tag = slot.byteslice(offset, Format::TAG_BYTES); offset += Format::TAG_BYTES
-          slot_padding = slot.byteslice(offset, header.slot_size - offset)
-          slot_ad = wrap_ad(header_hash, section.section_id, index, section.wrap_suite_id, hint, slot_padding)
-          shared = secret_key.decapsulate(kem_ct)
-          raise FormatError, "unexpected shared secret size" unless shared.bytesize == Format::XWING_SHARED_SECRET_BYTES
+          fields = Format.split_slot(slot, header.slot_size)
+          slot_ad = wrap_ad(header_hash, section.section_id, index, section.wrap_suite_id, hint, fields[:padding])
+          shared = secret_key.decapsulate(fields[:kem_ciphertext])
+          assert_size!("X-Wing shared secret", shared.bytesize, Format::XWING_SHARED_SECRET_BYTES, FormatError)
           kek = derive_kek(shared, header.payload_id, section.section_id, section.wrap_suite_id, index)
-          successes << Native.aegis256_decrypt(kek, nonce, slot_ad, wrapped, tag)
+          successes << Native.aegis256_decrypt(kek, fields[:wrap_nonce], slot_ad, fields[:wrapped_dek], fields[:wrap_tag])
         rescue PQCrypto::Error, AuthenticationError, ArgumentError, FormatError
-          # All KEM, malformed-point, and AEAD failures are a nonmatching slot.
         ensure
           wipe_string!(shared) if defined?(shared)
           wipe_string!(kek) if defined?(kek)
@@ -303,34 +309,24 @@ module PQCrypto
       Native.hkdf_sha256(shared_secret, info, Format::DEK_BYTES)
     end
 
+    def assert_size!(label, actual, expected, error = InvalidConfigurationError)
+      return if actual == expected
+      raise error, "#{label} must be #{expected} bytes, got #{actual}"
+    end
+
     def assert_xwing_public_key!(public_key)
-      bytes = public_key.to_bytes
-      unless bytes.bytesize == Format::XWING_PUBLIC_KEY_BYTES
-        raise InvalidConfigurationError,
-              "X-Wing public key must be #{Format::XWING_PUBLIC_KEY_BYTES} bytes, got #{bytes.bytesize}"
-      end
+      assert_size!("X-Wing public key", public_key.to_bytes.bytesize, Format::XWING_PUBLIC_KEY_BYTES)
     end
 
     def assert_xwing_encapsulation!(encapsulated)
-      unless encapsulated.ciphertext.bytesize == Format::XWING_CIPHERTEXT_BYTES
-        raise InvalidConfigurationError,
-              "X-Wing ciphertext must be #{Format::XWING_CIPHERTEXT_BYTES} bytes, got #{encapsulated.ciphertext.bytesize}"
-      end
-      unless encapsulated.shared_secret.bytesize == Format::XWING_SHARED_SECRET_BYTES
-        raise InvalidConfigurationError,
-              "X-Wing shared secret must be #{Format::XWING_SHARED_SECRET_BYTES} bytes, got #{encapsulated.shared_secret.bytesize}"
-      end
+      assert_size!("X-Wing ciphertext", encapsulated.ciphertext.bytesize, Format::XWING_CIPHERTEXT_BYTES)
+      assert_size!("X-Wing shared secret", encapsulated.shared_secret.bytesize, Format::XWING_SHARED_SECRET_BYTES)
     end
 
     def normalize_public_keys(value)
       keys = value.is_a?(Array) ? value : [value]
       raise InvalidConfigurationError, "at least one recipient is required" if keys.empty?
-      keys.each do |key|
-        unless key.is_a?(PQCrypto::HybridKEM::PublicKey) && key.algorithm == WRAP_KEM_ALGORITHM
-          raise InvalidConfigurationError, "recipient must be an X-Wing public key (#{WRAP_KEM_ALGORITHM})"
-        end
-        assert_xwing_public_key!(key)
-      end
+      keys.each { |key| validate_public_key!(key, "recipient must be an X-Wing public key (#{WRAP_KEM_ALGORITHM})") }
       fingerprints = keys.map { |key| Native.sha256(key.to_bytes) }
       if fingerprints.uniq.length != fingerprints.length
         raise InvalidConfigurationError, "recipient list contains duplicate public keys"
@@ -339,34 +335,33 @@ module PQCrypto
     end
 
     def normalize_credentials(value)
-      if value.is_a?(PQCrypto::HybridKEM::Keypair)
-        validate_secret_key!(value.secret_key)
-        unless value.public_key.is_a?(PQCrypto::HybridKEM::PublicKey) &&
-               value.public_key.algorithm == WRAP_KEM_ALGORITHM
-          raise InvalidConfigurationError, "credential public key is invalid"
+      secret_key, public_key = credential_pair(value)
+      validate_secret_key!(secret_key)
+      validate_public_key!(public_key, "credential public key is invalid")
+      [secret_key, public_key]
+    end
+
+    def credential_pair(value)
+      case value
+      when PQCrypto::HybridKEM::Keypair then [value.secret_key, value.public_key]
+      when Credentials then [value.secret_key, value.public_key]
+      when Array
+        unless value.length == 2
+          raise InvalidConfigurationError,
+                "with: must be a HybridKEM::Keypair, Seal.credentials(...), or [secret_key, public_key]"
         end
-        return [value.secret_key, value.public_key]
+        value
+      else
+        raise InvalidConfigurationError,
+              "with: must be a HybridKEM::Keypair, Seal.credentials(...), or [secret_key, public_key]"
       end
-      if value.is_a?(Credentials)
-        secret_key, public_key = value.secret_key, value.public_key
-        validate_secret_key!(secret_key)
-        unless public_key.is_a?(PQCrypto::HybridKEM::PublicKey) &&
-               public_key.algorithm == WRAP_KEM_ALGORITHM
-          raise InvalidConfigurationError, "credential public key is invalid"
-        end
-        return [secret_key, public_key]
+    end
+
+    def validate_public_key!(key, message)
+      unless key.is_a?(PQCrypto::HybridKEM::PublicKey) && key.algorithm == WRAP_KEM_ALGORITHM
+        raise InvalidConfigurationError, message
       end
-      if value.is_a?(Array) && value.length == 2
-        secret_key, public_key = value
-        validate_secret_key!(secret_key)
-        unless public_key.is_a?(PQCrypto::HybridKEM::PublicKey) &&
-               public_key.algorithm == WRAP_KEM_ALGORITHM
-          raise InvalidConfigurationError, "credential public key is invalid"
-        end
-        return [secret_key, public_key]
-      end
-      raise InvalidConfigurationError,
-            "with: must be a HybridKEM::Keypair, Seal.credentials(...), or [secret_key, public_key]"
+      assert_xwing_public_key!(key)
     end
 
     def validate_secret_key!(key)
@@ -396,7 +391,7 @@ module PQCrypto
     public_api = %i[
       credentials encrypt decrypt open inspect_envelope digest
       rebuild_recipients add_recipient drop_recipient_stanza rotate_dek
-    ].map(&:to_sym)
+    ]
     private_names = singleton_methods(false).map(&:to_sym) - public_api
     private_class_method(*private_names) unless private_names.empty?
   end

@@ -6,14 +6,21 @@
 #   * AFL harness  : reads one input from stdin (when AFL is available).
 #   * CI self-fuzz : `--ci --iterations N` generates valid envelopes and feeds
 #                    random mutations of them, plus fully random inputs, through
-#                    the public decrypt path. Any exception other than the
-#                    documented, expected error classes fails the run.
+#                    the public decrypt path. Any exception outside the
+#                    documented error classes fails the run.
 
 require "pq_crypto/seal"
 require "stringio"
 
 EXPECTED = [
-  PQCrypto::Seal::Error,
+  PQCrypto::Seal::FormatError,
+  PQCrypto::Seal::AuthenticationError,
+  PQCrypto::Seal::UnsupportedSuiteError,
+  PQCrypto::Seal::RecipientNotFoundError,
+  PQCrypto::Seal::AmbiguousRecipientStanzas,
+  PQCrypto::Seal::InvalidConfigurationError,
+  PQCrypto::Seal::ResourceLimitError,
+  PQCrypto::Seal::RecipientCapacityExceeded,
   PQCrypto::Error,
   ArgumentError,
   EOFError,
@@ -54,21 +61,21 @@ def mutate(bytes)
   return copy if copy.empty?
 
   case rand(6)
-  when 0 # flip bits
+  when 0
     rand(1..8).times { copy.setbyte(rand(copy.bytesize), rand(256)) }
-  when 1 # truncate
+  when 1
     copy = copy.byteslice(0, rand(0...copy.bytesize)).to_s.b
-  when 2 # extend with junk
+  when 2
     copy << Random.bytes(rand(1..64))
-  when 3 # zero a run
+  when 3
     start = rand(copy.bytesize)
     len = rand(1..[32, copy.bytesize - start].min)
     len.times { |i| copy.setbyte(start + i, 0) }
-  when 4 # duplicate a slice
+  when 4
     start = rand(copy.bytesize)
     len = rand(1..[64, copy.bytesize - start].min)
     copy << copy.byteslice(start, len)
-  else # single-byte increment
+  else
     i = rand(copy.bytesize)
     copy.setbyte(i, (copy.getbyte(i) + 1) & 0xff)
   end
@@ -85,9 +92,9 @@ def run_ci(iterations)
 
     candidate =
       case rand(3)
-      when 0 then Random.bytes(rand(0..4096)) # fully random
-      when 1 then mutate(base)                # mutated valid envelope
-      else        base.dup                    # unmodified (sanity)
+      when 0 then Random.bytes(rand(0..4096))
+      when 1 then mutate(base)
+      else        base.dup
       end
 
     result = strict_decrypt(candidate, KEYPAIR)

@@ -306,6 +306,8 @@ static void *update_decrypt_nogvl(void *ptr) {
 static VALUE state_update(VALUE self, VALUE input) {
     seal_state *st;
     TypedData_Get_Struct(self, seal_state, &state_type, st);
+    if (st->mode != 1 && st->mode != 2)
+        rb_raise(rb_eRuntimeError, "AEGIS state is not initialized");
     if (st->finalized)
         rb_raise(rb_eRuntimeError, "AEGIS state is finalized");
     StringValue(input);
@@ -326,6 +328,8 @@ static VALUE state_update(VALUE self, VALUE input) {
 static VALUE encrypt_final(VALUE self) {
     seal_state *st;
     TypedData_Get_Struct(self, seal_state, &state_type, st);
+    if (st->mode != 1)
+        rb_raise(rb_eRuntimeError, "AEGIS encrypt state is not initialized");
     if (st->finalized)
         rb_raise(rb_eRuntimeError, "AEGIS state is finalized");
     VALUE tag = rb_str_new(NULL, TAG_BYTES);
@@ -340,6 +344,8 @@ static VALUE encrypt_final(VALUE self) {
 static VALUE decrypt_final(VALUE self, VALUE tag) {
     seal_state *st;
     TypedData_Get_Struct(self, seal_state, &state_type, st);
+    if (st->mode != 2)
+        rb_raise(rb_eRuntimeError, "AEGIS decrypt state is not initialized");
     if (st->finalized)
         rb_raise(rb_eRuntimeError, "AEGIS state is finalized");
     require_length(tag, TAG_BYTES, "tag");

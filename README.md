@@ -47,8 +47,8 @@ takes precedence over automatic discovery.
 ```ruby
 require "pq_crypto/seal"
 
-alice = PQCrypto::HybridKEM.generate
-bob   = PQCrypto::HybridKEM.generate
+alice = PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)
+bob   = PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)
 
 sealed = PQCrypto::Seal.encrypt(
   image_bytes,
@@ -190,6 +190,17 @@ formal recipient anonymity is claimed.
 The wrapping KEM follows the MLKEM768-X25519/X-Wing construction, targeting
 approximately 128-bit security. ML-KEM-768 supplies conservative margin; the
 full hybrid suite is not advertised as NIST category 3.
+
+## Envelope identity
+
+`PQCrypto::Seal.digest(envelope)` is SHA-256 over the **complete** envelope
+bytes. The recipient section is intentionally mutable, so
+`rebuild_recipients` / `rotate_dek` change the digest even when the encrypted
+payload is unchanged. Use `opened.payload_id` (or `inspect_envelope`) for a
+stable document identifier.
+
+High `recipient_capacity` makes encryption slower: every empty slot still runs
+a full X-Wing encapsulation against a disposable keypair.
 
 ## Tests
 

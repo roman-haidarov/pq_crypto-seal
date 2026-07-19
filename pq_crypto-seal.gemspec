@@ -16,7 +16,6 @@ Gem::Specification.new do |spec|
 
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
-  spec.metadata["rubygems_mfa_required"] = "true"
 
   spec.files = Dir.chdir(__dir__) do
     Dir["{lib,ext,test,script,fuzz,.github}/**/*", "pq_crypto-seal.gemspec", "Gemfile", "Rakefile", "README.md", "GET_STARTED.md", "FORMAT.md", "SECURITY.md", "RELEASING.md", "CHANGELOG.md", "LICENSE.txt", "VENDORING.md"]

@@ -83,7 +83,8 @@ SHA-256(
 )
 ```
 
-The 32-byte KEK is derived with RFC 5869 HKDF-SHA256. Salt is absent. `info` is:
+The 32-byte KEK is derived with RFC 5869 HKDF-SHA256. Salt is the RFC 5869
+default of 32 zero bytes (HashLen zeros). `info` is:
 
 ```text
 "PQC-SEAL-V1-WRAP-KEY\0" ||

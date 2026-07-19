@@ -5,7 +5,6 @@ module PQCrypto
     module Padding
       module_function
 
-      # Padmé from PURBs: reveal only O(log log n) bits of the original length.
       def padme_target(length)
         n = Integer(length)
         raise ArgumentError, "length must be non-negative" if n.negative?
@@ -22,12 +21,9 @@ module PQCrypto
 
       def target(base_length, policy)
         case policy
-        when nil, :none
-          base_length
-        when :padme
-          padme_target(base_length)
-        when Hash
-          fixed_or_buckets(base_length, policy)
+        when nil, :none then base_length
+        when :padme then padme_target(base_length)
+        when Hash then fixed_or_buckets(base_length, policy)
         else
           raise InvalidConfigurationError, "unsupported padding policy: #{policy.inspect}"
         end

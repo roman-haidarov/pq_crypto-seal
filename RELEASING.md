@@ -27,3 +27,8 @@ frozen "plaintext to exact bytes" vector is intentionally not asserted for the
 KEM ciphertext region, because X-Wing encapsulation randomness originates inside
 `pq_crypto` and is not injectable here; the wire-contract check pins its exact
 sizes and round-trip instead.
+
+The ASan job sets `detect_leaks=0` because ASan is preloaded into an otherwise
+unsanitized Ruby interpreter; host-process allocator noise would otherwise fail
+the job. Memory-safety errors still abort via `halt_on_error`.
+

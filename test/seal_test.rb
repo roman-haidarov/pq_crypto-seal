@@ -154,10 +154,85 @@ class SealTest < Minitest::Test
     end
   end
 
+  def test_array_credentials_form
+    envelope = PQCrypto::Seal.encrypt("array-cred", to: @alice.public_key, padding: :none)
+    assert_equal "array-cred",
+                 PQCrypto::Seal.decrypt(envelope, with: [@alice.secret_key, @alice.public_key])
+  end
+
+  def test_fixed_and_bucket_padding_policies
+    fixed = PQCrypto::Seal.encrypt("x", to: @alice.public_key, padding: { to: 12_000 })
+    assert_equal 12_000, fixed.bytesize
+    assert_equal PQCrypto::Seal::Format::PADDING_FIXED,
+                 PQCrypto::Seal.inspect_envelope(fixed).padding_policy_id
+    assert_equal "x", PQCrypto::Seal.decrypt(fixed, with: @alice)
+
+    bucketed = PQCrypto::Seal.encrypt("y", to: @alice.public_key, padding: { buckets: [8_000, 16_000, 32_000] })
+    assert_includes [8_000, 16_000, 32_000], bucketed.bytesize
+    assert_equal PQCrypto::Seal::Format::PADDING_BUCKETS,
+                 PQCrypto::Seal.inspect_envelope(bucketed).padding_policy_id
+    assert_equal "y", PQCrypto::Seal.decrypt(bucketed, with: @alice)
+  end
+
+  def test_digest_changes_on_recipient_rebuild
+    envelope = PQCrypto::Seal.encrypt("stable-payload", to: @alice.public_key, padding: :none)
+    d1 = PQCrypto::Seal.digest(envelope)
+    rebuilt = PQCrypto::Seal.rebuild_recipients(
+      envelope, with: @alice, recipients: [@alice.public_key, @bob.public_key]
+    )
+    d2 = PQCrypto::Seal.digest(rebuilt)
+    refute_equal d1, d2
+    assert_equal PQCrypto::Seal.open(envelope, with: @alice).payload_id,
+                 PQCrypto::Seal.open(rebuilt, with: @alice).payload_id
+  end
+
   def test_wrap_kem_algorithm_is_pinned
     assert_equal :ml_kem_768_x25519_xwing, PQCrypto::Seal::WRAP_KEM_ALGORITHM
     assert_equal 1216, PQCrypto::Seal::Format::XWING_PUBLIC_KEY_BYTES
     assert_equal 1120, PQCrypto::Seal::Format::XWING_CIPHERTEXT_BYTES
     assert_equal 32, PQCrypto::Seal::Format::XWING_SHARED_SECRET_BYTES
+    refute PQCrypto::Seal::Format.const_defined?(:XWING_SECRET_KEY_BYTES)
   end
+
+  def test_index_binding_prevents_naive_slot_duplication
+    # wrap_ad / derive_kek bind slot_index, so byte-copying a real slot into
+    # another index cannot open a second time for the same recipient.
+    envelope = PQCrypto::Seal.encrypt(
+      "ambig", to: @alice.public_key, recipient_capacity: 2, slot_size: 2048, padding: :none
+    )
+    header = PQCrypto::Seal::Format.parse_header(envelope)
+    section_offset = header.raw.bytesize
+    slots_offset = section_offset + 2 + PQCrypto::Seal::Format::SECTION_ID_BYTES
+    slot0 = envelope.byteslice(slots_offset, header.slot_size)
+    broken = envelope.dup
+    broken[slots_offset + header.slot_size, header.slot_size] = slot0
+    assert_equal "ambig", PQCrypto::Seal.decrypt(broken, with: @alice)
+  end
+
+  def test_two_valid_stanzas_for_same_recipient_are_ambiguous
+    # Defense-in-depth: a crafted envelope with two correctly-built slots for
+    # the same public key (different indices) must not pick an arbitrary DEK.
+    envelope = PQCrypto::Seal.encrypt(
+      "ambig", to: @alice.public_key, recipient_capacity: 2, slot_size: 2048, padding: :none
+    )
+    header, section, ciphertext, tag = PQCrypto::Seal.send(:parse_envelope, envelope)
+    dek = PQCrypto::Seal.send(:unwrap_dek, header, section, @alice)
+    crafted_section = PQCrypto::Seal.send(
+      :build_recipient_section,
+      recipients: [@alice.public_key, @alice.public_key],
+      capacity: 2,
+      slot_size: header.slot_size,
+      payload_id: header.payload_id,
+      header_hash: PQCrypto::Seal.const_get(:Native).sha256(header.raw),
+      dek: dek,
+      wrap_suite_id: PQCrypto::Seal::Format::WRAP_SUITE_MLKEM768_X25519_AEGIS256
+    )
+    crafted = header.raw + crafted_section + ciphertext + tag
+    assert_raises(PQCrypto::Seal::AmbiguousRecipientStanzas) do
+      PQCrypto::Seal.decrypt(crafted, with: @alice)
+    end
+  ensure
+    PQCrypto::Seal.send(:wipe_string!, dek) if defined?(dek)
+  end
+
 end

@@ -16,92 +16,56 @@ module PQCrypto
         content_size = Integer(size)
         raise ArgumentError, "size must be non-negative" if content_size.negative?
         metadata = String(metadata).b
-        Seal.send(:validate_private_metadata!, metadata)
-        recipients = Seal.send(:normalize_public_keys, to)
+        seal(:validate_private_metadata!, metadata)
+        recipients = seal(:normalize_public_keys, to)
         capacity = Format.validate_capacity!(recipient_capacity, recipients.length)
         slot_size = Format.validate_slot_size!(slot_size)
         chunk_size = validate_chunk_size(chunk_size)
-        padding_policy_id = Format.padding_policy_id_for(padding)
 
-        payload_id = Native.random_bytes(Format::PAYLOAD_ID_BYTES)
-        payload_nonce = Native.random_bytes(Format::NONCE_BYTES)
-        dek = Native.random_bytes(Format::DEK_BYTES)
-        prefix = Format.inner_prefix(content_size, metadata.bytesize)
-        raw_inner_length = prefix.bytesize + metadata.bytesize + content_size
-        placeholder = Format.build_header(
-          payload_id: payload_id, payload_nonce: payload_nonce,
-          recipient_capacity: capacity, slot_size: slot_size,
-          padded_inner_length: raw_inner_length, public_metadata: public_metadata,
-          padding_policy_id: padding_policy_id
-        )
-        fixed = placeholder.bytesize + Format.section_length_for(capacity, slot_size) + Format::TAG_BYTES
-        target = Padding.target(fixed + raw_inner_length, padding)
-        padded_inner_length = target - fixed
-        header = Format.build_header(
-          payload_id: payload_id, payload_nonce: payload_nonce,
-          recipient_capacity: capacity, slot_size: slot_size,
-          padded_inner_length: padded_inner_length, public_metadata: public_metadata,
-          padding_policy_id: padding_policy_id
-        )
-        header_hash = Native.sha256(header)
-        section = Seal.send(
-          :build_recipient_section,
+        parts = nil
+        parts = seal(
+          :materialize_crypto_parts,
           recipients: recipients, capacity: capacity, slot_size: slot_size,
-          payload_id: payload_id, header_hash: header_hash, dek: dek,
-          wrap_suite_id: Format::WRAP_SUITE_MLKEM768_X25519_AEGIS256
+          padding: padding, public_metadata: public_metadata,
+          content_size: content_size, metadata_size: metadata.bytesize
         )
-        output.write(header)
-        output.write(section)
-        encryptor = Native::Encryptor.new(dek, payload_nonce, header_hash)
-        output.write(encryptor.update(prefix))
+        output.write(parts[:header])
+        output.write(parts[:section])
+        encryptor = Native::Encryptor.new(parts[:dek], parts[:payload_nonce], parts[:header_hash])
+        output.write(encryptor.update(parts[:inner_prefix]))
         output.write(encryptor.update(metadata)) unless metadata.empty?
         copied = copy_exact_encrypted(input, output, encryptor, content_size, chunk_size)
         raise EOFError, "input ended after #{copied} of #{content_size} bytes" unless copied == content_size
         if strict_size
-          extra = input.read(1)
-          raise ArgumentError, "input contains more bytes than declared size" unless extra.nil?
+          raise ArgumentError, "input contains more bytes than declared size" unless input.read(1).nil?
         end
-        padding_length = padded_inner_length - raw_inner_length
-        write_random_encrypted(output, encryptor, padding_length, chunk_size)
+        write_random_encrypted(output, encryptor, parts[:padded_inner_length] - parts[:raw_inner_length], chunk_size)
         output.write(encryptor.final)
         output
       ensure
-        Seal.send(:wipe_string!, dek) if defined?(dek)
-        Seal.send(:wipe_string!, metadata) if defined?(metadata) && metadata.is_a?(String) && !metadata.frozen?
+        seal(:wipe_string!, parts[:dek]) if parts
+        seal(:wipe_string!, metadata) if metadata.is_a?(String) && !metadata.frozen?
       end
 
       def decrypt_io(input, output, with:, staging_directory: nil, chunk_size: DEFAULT_CHUNK_SIZE,
-                     strict_eof: true,
-                     max_staging_bytes: Format::DEFAULT_MAX_STAGING_BYTES,
-                     max_plaintext_bytes: Format::DEFAULT_MAX_PLAINTEXT_BYTES,
-                     max_envelope_bytes: Format::DEFAULT_MAX_ENVELOPE_BYTES)
+                     strict_eof: true, **limits)
+        limits = Format::LIMIT_DEFAULTS.merge(limits)
         chunk_size = validate_chunk_size(chunk_size)
-        staging = Tempfile.new(["pqcrypto-seal-inner", ".bin"], staging_directory)
-        staging.binmode
-        staging.chmod(0o600)
-        unlink_open_tempfile(staging)
+        staging = new_staging("pqcrypto-seal-inner", staging_directory)
         opened = decrypt_to_staging(
-          input, staging, with: with, chunk_size: chunk_size, strict_eof: strict_eof,
-          max_staging_bytes: max_staging_bytes,
-          max_plaintext_bytes: max_plaintext_bytes,
-          max_envelope_bytes: max_envelope_bytes
+          input, staging, with: with, chunk_size: chunk_size, strict_eof: strict_eof, **limits
         )
         staging.flush
         staging.rewind
         content_offset, content_length, metadata = parse_verified_staging(staging, opened[:header].padded_inner_length)
-        if content_length > Integer(max_plaintext_bytes)
+        if content_length > Integer(limits[:max_plaintext_bytes])
+          seal(:wipe_string!, metadata)
           raise ResourceLimitError,
-                "plaintext #{content_length} exceeds max_plaintext_bytes #{max_plaintext_bytes}"
+                "plaintext #{content_length} exceeds max_plaintext_bytes #{limits[:max_plaintext_bytes]}"
         end
         staging.seek(content_offset, ::IO::SEEK_SET)
         copy_exact(staging, output, content_length, chunk_size)
-        Opened.new(
-          data: nil, metadata: metadata, public_metadata: opened[:header].public_metadata,
-          payload_id: opened[:header].payload_id,
-          content_suite_id: opened[:header].content_suite_id,
-          wrap_suite_id: opened[:section].wrap_suite_id,
-          padding_policy_id: opened[:header].padding_policy_id
-        )
+        Opened.from_header(opened[:header], opened[:section], data: nil, metadata: metadata)
       ensure
         staging.close! if defined?(staging) && staging
       end
@@ -124,18 +88,13 @@ module PQCrypto
         destination
       end
 
-      def decrypt_file(source, destination, with:, staging_directory: nil, chunk_size: DEFAULT_CHUNK_SIZE,
-                       max_staging_bytes: Format::DEFAULT_MAX_STAGING_BYTES,
-                       max_plaintext_bytes: Format::DEFAULT_MAX_PLAINTEXT_BYTES,
-                       max_envelope_bytes: Format::DEFAULT_MAX_ENVELOPE_BYTES)
+      def decrypt_file(source, destination, with:, staging_directory: nil,
+                       chunk_size: DEFAULT_CHUNK_SIZE, **limits)
         File.open(source, "rb") do |input|
           atomic_destination(destination) do |tmp|
             decrypt_io(
               input, tmp, with: with, staging_directory: staging_directory,
-              chunk_size: chunk_size, strict_eof: true,
-              max_staging_bytes: max_staging_bytes,
-              max_plaintext_bytes: max_plaintext_bytes,
-              max_envelope_bytes: max_envelope_bytes
+              chunk_size: chunk_size, strict_eof: true, **limits
             )
           end
         end
@@ -145,16 +104,12 @@ module PQCrypto
       def rebuild_recipients_file(source, destination, with:, recipients:, chunk_size: DEFAULT_CHUNK_SIZE)
         chunk_size = validate_chunk_size(chunk_size)
         File.open(source, "rb") do |input|
-          initial = read_exact(input, Format::MAGIC.bytesize + 1 + 4)
-          header_length = initial.byteslice(Format::MAGIC.bytesize + 1, 4).unpack1("N")
-          raise FormatError, "invalid header length" if header_length < initial.bytesize || header_length > Format::MAX_HEADER_BYTES
-          header = Format.parse_header(initial + read_exact(input, header_length - initial.bytesize))
-          old_section_bytes = read_exact(input, Format.section_length(header))
-          old_section = Format.parse_section(old_section_bytes, 0, header)
-          dek = Seal.send(:unwrap_dek, header, old_section, with)
-          public_keys = Seal.send(:normalize_public_keys, recipients)
+          header = read_header(input)
+          old_section = Format.parse_section(read_exact(input, Format.section_length(header)), 0, header)
+          dek = seal(:unwrap_dek, header, old_section, with)
+          public_keys = seal(:normalize_public_keys, recipients)
           Format.validate_capacity!(header.recipient_capacity, public_keys.length)
-          new_section = Seal.send(
+          new_section = seal(
             :build_recipient_section,
             recipients: public_keys, capacity: header.recipient_capacity,
             slot_size: header.slot_size, payload_id: header.payload_id,
@@ -170,8 +125,7 @@ module PQCrypto
               take = [remaining, chunk_size].min
               ciphertext_chunk = read_exact(input, take)
               tmp.write(ciphertext_chunk)
-              plaintext_chunk = verifier.update(ciphertext_chunk)
-              Seal.send(:wipe_string!, plaintext_chunk)
+              seal(:wipe_string!, verifier.update(ciphertext_chunk))
               remaining -= take
             end
             payload_tag = read_exact(input, Format::TAG_BYTES)
@@ -180,7 +134,7 @@ module PQCrypto
             tmp.write(payload_tag)
           end
         ensure
-          Seal.send(:wipe_string!, dek) if defined?(dek)
+          seal(:wipe_string!, dek) if defined?(dek)
         end
         destination
       end
@@ -198,10 +152,7 @@ module PQCrypto
 
       def rotate_dek_file(source, destination, with:, recipients:, padding: :preserve,
                           staging_directory: nil, chunk_size: DEFAULT_CHUNK_SIZE)
-        plaintext = Tempfile.new(["pqcrypto-seal-rotation", ".bin"], staging_directory)
-        plaintext.binmode
-        plaintext.chmod(0o600)
-        unlink_open_tempfile(plaintext)
+        plaintext = new_staging("pqcrypto-seal-rotation", staging_directory)
         opened = nil
         File.open(source, "rb") do |input|
           opened = decrypt_io(input, plaintext, with: with,
@@ -222,70 +173,45 @@ module PQCrypto
         destination
       ensure
         plaintext.close! if defined?(plaintext) && plaintext
-        Seal.send(:wipe_string!, opened.metadata) if defined?(opened) && opened && opened.metadata
+        seal(:wipe_string!, opened.metadata) if defined?(opened) && opened && opened.metadata
       end
 
       def inspect_file(source)
         File.open(source, "rb") do |input|
-          initial = read_exact(input, Format::MAGIC.bytesize + 1 + 4)
-          header_length = initial.byteslice(Format::MAGIC.bytesize + 1, 4).unpack1("N")
-          raise FormatError, "invalid header length" if header_length < initial.bytesize || header_length > Format::MAX_HEADER_BYTES
-          header = Format.parse_header(initial + read_exact(input, header_length - initial.bytesize))
+          header = read_header(input)
           section = Format.parse_section(read_exact(input, Format.section_length(header)), 0, header)
           total = header.raw.bytesize + section.raw.bytesize + header.padded_inner_length + Format::TAG_BYTES
           raise FormatError, "file length does not match envelope" unless File.size(source) == total
-          Inspection.new(
-            payload_id: header.payload_id, public_metadata: header.public_metadata,
-            recipient_capacity: header.recipient_capacity, slot_size: header.slot_size,
-            padded_inner_length: header.padded_inner_length,
-            content_suite_id: header.content_suite_id, wrap_suite_id: section.wrap_suite_id,
-            padding_policy_id: header.padding_policy_id,
-            envelope_bytes: total
-          )
+          Inspection.from_header(header, section, envelope_bytes: total)
         end
       end
 
-      def decrypt_to_staging(input, staging, with:, chunk_size:, strict_eof:,
-                             max_staging_bytes:, max_plaintext_bytes:, max_envelope_bytes:)
-        initial = read_exact(input, Format::MAGIC.bytesize + 1 + 4)
-        header_length = initial.byteslice(Format::MAGIC.bytesize + 1, 4).unpack1("N")
-        raise FormatError, "invalid header length" if header_length < initial.bytesize || header_length > Format::MAX_HEADER_BYTES
-        rest = read_exact(input, header_length - initial.bytesize)
-        header = Format.parse_header(initial + rest)
+      def decrypt_to_staging(input, staging, with:, chunk_size:, strict_eof:, **limits)
+        limits = Format::LIMIT_DEFAULTS.merge(limits)
+        header = read_header(input)
+        Format.check_resource_limits!(
+          padded_inner_length: header.padded_inner_length, **Format.pre_auth_limits(limits)
+        )
+        section = Format.parse_section(read_exact(input, Format.section_length(header)), 0, header)
+        estimated = header.raw.bytesize + section.raw.bytesize + header.padded_inner_length + Format::TAG_BYTES
         Format.check_resource_limits!(
           padded_inner_length: header.padded_inner_length,
-          max_staging_bytes: max_staging_bytes,
-          max_plaintext_bytes: max_plaintext_bytes,
-          max_envelope_bytes: max_envelope_bytes
+          envelope_bytes: estimated, **Format.pre_auth_limits(limits)
         )
-        section_bytes = read_exact(input, Format.section_length(header))
-        section = Format.parse_section(section_bytes, 0, header)
-        estimated_envelope =
-          header.raw.bytesize + section.raw.bytesize + header.padded_inner_length + Format::TAG_BYTES
-        Format.check_resource_limits!(
-          padded_inner_length: header.padded_inner_length,
-          envelope_bytes: estimated_envelope,
-          max_staging_bytes: max_staging_bytes,
-          max_plaintext_bytes: max_plaintext_bytes,
-          max_envelope_bytes: max_envelope_bytes
-        )
-        dek = Seal.send(:unwrap_dek, header, section, with)
+        dek = seal(:unwrap_dek, header, section, with)
         decryptor = Native::Decryptor.new(dek, header.payload_nonce, Native.sha256(header.raw))
         remaining = header.padded_inner_length
         while remaining.positive?
           take = [remaining, chunk_size].min
-          chunk = read_exact(input, take)
-          staging.write(decryptor.update(chunk))
+          staging.write(decryptor.update(read_exact(input, take)))
           remaining -= take
         end
         tag = read_exact(input, Format::TAG_BYTES)
-        if strict_eof
-          raise FormatError, "trailing bytes after envelope" unless input.read(1).nil?
-        end
+        raise FormatError, "trailing bytes after envelope" if strict_eof && !input.read(1).nil?
         decryptor.final(tag)
         { header: header, section: section }
       ensure
-        Seal.send(:wipe_string!, dek) if defined?(dek)
+        seal(:wipe_string!, dek) if defined?(dek)
       end
 
       def parse_verified_staging(staging, expected_size)
@@ -303,6 +229,18 @@ module PQCrypto
         raise FormatError, "inner lengths exceed authenticated frame" if minimum > expected_size
         metadata = read_exact(staging, metadata_length)
         [14 + metadata_length, content_length, metadata]
+      end
+
+      def read_header(input)
+        prefix_len = Format::MAGIC.bytesize + 1 + 4
+        initial = read_exact(input, prefix_len)
+        header_length = initial.byteslice(Format::MAGIC.bytesize + 1, 4).unpack1("N")
+        raise FormatError, "invalid header length" if header_length < initial.bytesize || header_length > Format::MAX_HEADER_BYTES
+        Format.parse_header(initial + read_exact(input, header_length - initial.bytesize))
+      end
+
+      def seal(name, *args, **kwargs)
+        Seal.send(name, *args, **kwargs)
       end
 
       def atomic_destination(destination)
@@ -348,7 +286,7 @@ module PQCrypto
           take = [remaining, chunk_size].min
           random = Native.random_bytes(take)
           output.write(encryptor.update(random))
-          Seal.send(:wipe_string!, random)
+          seal(:wipe_string!, random)
           remaining -= take
         end
       end
@@ -372,6 +310,14 @@ module PQCrypto
           buffer << chunk.b
         end
         buffer
+      end
+
+      def new_staging(prefix, staging_directory)
+        tempfile = Tempfile.new([prefix, ".bin"], staging_directory)
+        tempfile.binmode
+        tempfile.chmod(0o600)
+        unlink_open_tempfile(tempfile)
+        tempfile
       end
 
       def unlink_open_tempfile(tempfile)

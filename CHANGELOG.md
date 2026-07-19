@@ -2,6 +2,11 @@
 
 ## 0.1.0
 
+- AEGIS streaming state rejects `update`/`final` before `initialize` (`mode` guard).
+- Encrypt path wipes the internal plaintext copy in `ensure` (caller buffers unchanged).
+- CI: Actions pinned by commit SHA, `permissions: contents: read`, fuzz + gem-smoke jobs.
+- Repository hygiene: `.DS_Store` / build artifacts ignored; no tracked binaries.
+
 - Initial versioned `PQCSEAL1` envelope format.
 - Multi-recipient DEK wrapping through `PQCrypto::HybridKEM` algorithm
   `:ml_kem_768_x25519_xwing` (pinned; not `CANONICAL_ALGORITHM`).

@@ -18,8 +18,7 @@ module PQCrypto
       end
 
       def u64(value)
-        value = integer!(value, 0xffff_ffff_ffff_ffff)
-        [value >> 32, value & 0xffff_ffff].pack("NN")
+        [integer!(value, 0xffff_ffff_ffff_ffff)].pack("Q>")
       end
 
       def read_u8(bytes, offset)
@@ -39,8 +38,7 @@ module PQCrypto
 
       def read_u64(bytes, offset)
         ensure_available!(bytes, offset, 8)
-        hi, lo = bytes.byteslice(offset, 8).unpack("NN")
-        [(hi << 32) | lo, offset + 8]
+        [bytes.byteslice(offset, 8).unpack1("Q>"), offset + 8]
       end
 
       def read_bytes(bytes, offset, length)

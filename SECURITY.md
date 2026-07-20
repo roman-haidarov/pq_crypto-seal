@@ -1,7 +1,7 @@
 # Security
 
 This project has not received an independent cryptographic or implementation
-audit. Do not treat version 0.1.0 as a substitute for a reviewed storage design.
+audit. Do not treat version 0.1.1 as a substitute for a reviewed storage design.
 
 Experimental cryptographic software; format v1; not independently audited.
 
@@ -44,6 +44,22 @@ callers that need residual-data hygiene must clear their own buffers.
 `Opened#data` / `Opened#metadata` returned from `open` are the caller's
 responsibility after use.
 
+
+## payload_id stability
+
+`payload_id` is stable across `rebuild_recipients` / add / drop operations.
+`rotate_dek` re-encrypts the payload with a fresh DEK and **allocates a new
+`payload_id`** — treat the result as a new document identity. Applications that
+need a stable external id across DEK rotation must track it outside the envelope.
+
+## Padding policy enforcement
+
+The authenticated header carries `padding_policy_id` only. Receivers that require
+a specific length-hiding policy should pass `required_padding:` to decrypt/open
+(for example `required_padding: :padme` or `required_padding: :from_header`).
+The receiver then checks both the policy id and the canonical target computed from
+authenticated inner lengths. Without that argument the field is informational.
+
 ## Envelope digests
 
 `Seal.digest` hashes the complete envelope, including the mutable recipient
@@ -77,7 +93,7 @@ forensics may still retain remnants; use a suitably protected staging filesystem
 
 `wrap_suite_id = 1` is permanently bound to MLKEM768-X25519 / X-Wing (draft-10
 compatible) with fixed public-key (1216), ciphertext (1120), and shared-secret
-(32) sizes, as implemented by `pq_crypto ~> 0.6.4`. Seal does not follow
+(32) sizes, as implemented by `pq_crypto = 0.6.4`. Seal does not follow
 `HybridKEM::CANONICAL_ALGORITHM`; a future change of that constant must not
 alter suite 1 wire bytes. Always generate keys with
 `PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)`.

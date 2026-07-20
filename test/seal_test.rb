@@ -235,4 +235,74 @@ class SealTest < Minitest::Test
     PQCrypto::Seal.send(:wipe_string!, dek) if defined?(dek)
   end
 
+
+  def test_required_padding_padme_accepts_honest_envelope
+    env = PQCrypto::Seal.encrypt("pad-ok", to: @alice.public_key, padding: :padme)
+    assert_equal "pad-ok", PQCrypto::Seal.decrypt(env, with: @alice, required_padding: :padme)
+    assert_equal "pad-ok", PQCrypto::Seal.decrypt(env, with: @alice, required_padding: :from_header)
+  end
+
+  def test_required_padding_none_rejects_padme_envelope
+    env = PQCrypto::Seal.encrypt("pad-bad", to: @alice.public_key, padding: :padme)
+    assert_raises(PQCrypto::Seal::FormatError) do
+      PQCrypto::Seal.decrypt(env, with: @alice, required_padding: :none)
+    end
+  end
+
+  def test_required_padding_none_accepts_none_envelope
+    env = PQCrypto::Seal.encrypt("plain", to: @alice.public_key, padding: :none)
+    assert_equal "plain", PQCrypto::Seal.decrypt(env, with: @alice, required_padding: :none)
+  end
+
+  def test_rotate_dek_changes_payload_id
+    env = PQCrypto::Seal.encrypt("rot", to: @alice.public_key, padding: :none)
+    before = PQCrypto::Seal.inspect_envelope(env).payload_id
+    rotated = PQCrypto::Seal.rotate_dek(env, with: @alice, recipients: [@alice.public_key], padding: :none)
+    after = PQCrypto::Seal.inspect_envelope(rotated).payload_id
+    refute_equal before, after
+    assert_equal "rot", PQCrypto::Seal.decrypt(rotated, with: @alice)
+  end
+
+  def test_required_padding_checks_policy_id_for_parameterized_policies
+    fixed = PQCrypto::Seal.encrypt("fixed", to: @alice.public_key, padding: { to: 12_000 })
+    assert_equal "fixed", PQCrypto::Seal.decrypt(
+      fixed, with: @alice, required_padding: { to: 12_000 }
+    )
+    assert_raises(PQCrypto::Seal::FormatError) do
+      PQCrypto::Seal.decrypt(
+        fixed, with: @alice, required_padding: { buckets: [12_000, 24_000] }
+      )
+    end
+  end
+
+  def test_required_padme_rejects_authenticated_noncanonical_envelope
+    native = PQCrypto::Seal.const_get(:Native, false)
+    payload_id = native.random_bytes(PQCrypto::Seal::Format::PAYLOAD_ID_BYTES)
+    nonce = native.random_bytes(PQCrypto::Seal::Format::NONCE_BYTES)
+    dek = native.random_bytes(PQCrypto::Seal::Format::DEK_BYTES)
+    inner = PQCrypto::Seal::Format.inner_prefix(4, 0) + "data"
+    header = PQCrypto::Seal::Format.build_header(
+      payload_id: payload_id, payload_nonce: nonce,
+      recipient_capacity: 1, slot_size: 2048,
+      padded_inner_length: inner.bytesize, public_metadata: "",
+      padding_policy_id: PQCrypto::Seal::Format::PADDING_PADME
+    )
+    section = PQCrypto::Seal.send(
+      :build_recipient_section,
+      recipients: [@alice.public_key], capacity: 1, slot_size: 2048,
+      payload_id: payload_id, header_hash: native.sha256(header), dek: dek,
+      wrap_suite_id: PQCrypto::Seal::Format::WRAP_SUITE_MLKEM768_X25519_AEGIS256
+    )
+    ciphertext, tag = native.aegis256_encrypt(dek, nonce, native.sha256(header), inner)
+    envelope = header + section + ciphertext + tag
+
+    refute_equal envelope.bytesize, PQCrypto::Seal::Padding.padme_target(envelope.bytesize)
+    assert_raises(PQCrypto::Seal::FormatError) do
+      PQCrypto::Seal.decrypt(envelope, with: @alice, required_padding: :padme)
+    end
+  ensure
+    PQCrypto::Seal.send(:wipe_string!, dek) if defined?(dek)
+    PQCrypto::Seal.send(:wipe_string!, inner) if defined?(inner)
+  end
+
 end

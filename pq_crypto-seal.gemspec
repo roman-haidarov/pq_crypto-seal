@@ -16,21 +16,37 @@ Gem::Specification.new do |spec|
 
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
+  spec.metadata["rubygems_mfa_required"] = "true"
 
   spec.files = Dir.chdir(__dir__) do
-    Dir["{lib,ext,test,script,fuzz,.github}/**/*", "pq_crypto-seal.gemspec", "Gemfile", "Rakefile", "README.md", "GET_STARTED.md", "FORMAT.md", "SECURITY.md", "RELEASING.md", "CHANGELOG.md", "LICENSE.txt", "VENDORING.md"]
-      .select { |path| File.file?(path) }
-      .reject do |path|
-        path.match?(/(?:\.o|\.so|\.bundle|\.gem)\z/) ||
-          path.end_with?("/Makefile", "/mkmf.log") ||
-          path.include?("/.DS_Store") || false
-      end
+    vendor = "ext/pq_crypto_seal/vendor/libaegis"
+    patterns = [
+      "lib/**/*.rb",
+      "ext/pq_crypto_seal/extconf.rb",
+      "ext/pq_crypto_seal/pq_crypto_seal.c",
+      "ext/pq_crypto_seal/aegis_unused_stubs.c",
+      "#{vendor}/LICENSE",
+      "#{vendor}/TREE_SHA256",
+      "#{vendor}/src/aegis256/*.{c,h}",
+      "#{vendor}/src/common/*.{c,h}",
+      "#{vendor}/src/include/*.h",
+      "pq_crypto-seal.gemspec",
+      "README.md",
+      "GET_STARTED.md",
+      "FORMAT.md",
+      "SECURITY.md",
+      "RELEASING.md",
+      "CHANGELOG.md",
+      "LICENSE.txt",
+      "VENDORING.md"
+    ]
+    patterns.flat_map { |pattern| Dir[pattern] }.select { |path| File.file?(path) }.uniq.sort
   end
   spec.bindir = "exe"
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/pq_crypto_seal/extconf.rb"]
 
-  spec.add_runtime_dependency "pq_crypto", "~> 0.6.4"
+  spec.add_runtime_dependency "pq_crypto", "= 0.6.4"
   spec.add_development_dependency "minitest", "~> 5.14"
   spec.add_development_dependency "rake", "~> 13.0"
   spec.add_development_dependency "rake-compiler", "~> 1.2"

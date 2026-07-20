@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "json"
 require_relative "test_helper"
 
 # Protocol-drift detection for the frozen v1 wire format.
@@ -29,17 +30,17 @@ class GoldenVectorsTest < Minitest::Test
     def initialize(seed, native)
       @state = [seed].pack("Q>")
       @native = native
+      @buffer = +"".b
     end
 
     def bytes(length)
       return "".b if length.zero?
 
-      out = +"".b
-      while out.bytesize < length
+      while @buffer.bytesize < length
         @state = @native.sha256(@state)
-        out << @state
+        @buffer << @state
       end
-      out.byteslice(0, length).b
+      @buffer.slice!(0, length).b
     end
   end
 
@@ -180,4 +181,48 @@ class GoldenVectorsTest < Minitest::Test
     assert_equal PQCrypto::Seal::Padding.padme_target(info.envelope_bytes),
                  info.envelope_bytes
   end
+  def test_exact_frozen_envelope_and_streaming_equivalence
+    vector = JSON.parse(File.read(File.expand_path("fixtures/xwing-draft-10-vector-1.json", __dir__)))
+    public_key = PQCrypto::HybridKEM.public_key_from_bytes(
+      PQCrypto::Seal::WRAP_KEM_ALGORITHM, [vector.fetch("pk")].pack("H*")
+    )
+    secret_key = PQCrypto::HybridKEM.secret_key_from_bytes(
+      PQCrypto::Seal::WRAP_KEM_ALGORITHM, [vector.fetch("sk")].pack("H*")
+    )
+    keypair = PQCrypto::HybridKEM::Keypair.new(public_key, secret_key)
+    data = ("frozen-envelope\0" * 300).b
+
+    one_shot = deterministic_envelope(public_key, vector) do
+      PQCrypto::Seal.encrypt(
+        data, to: public_key, metadata: "private", public_metadata: "public",
+        recipient_capacity: 1, slot_size: 2048, padding: :padme
+      )
+    end
+
+    streamed = deterministic_envelope(public_key, vector) do
+      output = StringIO.new(+"".b)
+      PQCrypto::Seal.encrypt_io(
+        StringIO.new(data), output, size: data.bytesize, to: public_key,
+        metadata: "private", public_metadata: "public",
+        recipient_capacity: 1, slot_size: 2048, padding: :padme, chunk_size: 37
+      )
+      output.string
+    end
+
+    assert_equal one_shot, streamed
+    assert_equal "b96c70f6086d380b1f7ea5f2dfb1c91f2a120a25f9708a16e8feecf8d2e72fdf", native.sha256(one_shot).unpack1("H*")
+    assert_equal data, PQCrypto::Seal.decrypt(one_shot, with: keypair, required_padding: :padme)
+  ensure
+    secret_key.wipe! if secret_key
+  end
+
+  def deterministic_envelope(public_key, vector)
+    encapsulation = PQCrypto::HybridKEM::EncapsulationResult.new(
+      [vector.fetch("ct")].pack("H*"), [vector.fetch("ss")].pack("H*")
+    )
+    with_deterministic_random(0x0123_4567_89AB_CDEF) do
+      public_key.stub(:encapsulate, encapsulation) { yield }
+    end
+  end
+
 end

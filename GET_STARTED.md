@@ -28,3 +28,13 @@ Recipient-section rebuilds always require the application's complete,
 authoritative public-key ACL. They do not revoke access to plaintext or old
 envelope copies. Use `rotate_dek`/`rotate_dek_file` when a new payload key and
 full re-encryption are required.
+
+## Large documents
+
+Default one-shot limits are 64 MiB (`max_plaintext_bytes` / related staging and
+envelope ceilings). For larger objects use `encrypt_file` / `decrypt_file` or
+`encrypt_io` / `decrypt_io` and raise the limits explicitly, for example:
+
+```ruby
+PQCrypto::Seal.decrypt_file(src, dst, with: credentials, max_plaintext_bytes: 512 * 1024 * 1024)
+```

@@ -12,3 +12,9 @@ libaegis 0.10.3.
 The complete source snapshot is retained, while the Ruby extension compiles only the AEGIS-256 and common implementation files it exposes. No system libaegis is
 loaded at runtime. Update the version, archive checksum, source snapshot, KATs,
 and cross-backend tests together.
+
+The git tree keeps the full upstream snapshot so `script/vendor_libs.rb --check`
+can prove byte-identity against the audited archive. The published gem package
+ships only the AEGIS-256 family plus shared `common`/`include` sources required
+to compile the extension (see `pq_crypto-seal.gemspec`); unused families and RAF
+remain in the repository for provenance and are not loaded at runtime.

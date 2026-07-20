@@ -16,17 +16,7 @@ module PQCrypto
       PADDING_PADME = 1
       PADDING_FIXED = 2
       PADDING_BUCKETS = 3
-      PADDING_POLICY_IDS = {
-        PADDING_NONE => true,
-        PADDING_PADME => true,
-        PADDING_FIXED => true,
-        PADDING_BUCKETS => true
-      }.freeze
-      PADDING_POLICY_BY_SYMBOL = {
-        nil => PADDING_NONE,
-        :none => PADDING_NONE,
-        :padme => PADDING_PADME
-      }.freeze
+      PADDING_POLICY_IDS = [PADDING_NONE, PADDING_PADME, PADDING_FIXED, PADDING_BUCKETS].freeze
 
       PAYLOAD_ID_BYTES = 32
       NONCE_BYTES = 32
@@ -50,7 +40,7 @@ module PQCrypto
       MAX_PRIVATE_METADATA_BYTES = 16 * 1024 * 1024
       MAX_HEADER_BYTES = 2 * 1024 * 1024
 
-      DEFAULT_MAX_PLAINTEXT_BYTES = 1 * 1024 * 1024 * 1024
+      DEFAULT_MAX_PLAINTEXT_BYTES = 64 * 1024 * 1024
       DEFAULT_MAX_STAGING_BYTES = DEFAULT_MAX_PLAINTEXT_BYTES + MAX_PRIVATE_METADATA_BYTES + 64
       DEFAULT_MAX_ENVELOPE_BYTES =
         MAX_HEADER_BYTES +
@@ -64,13 +54,22 @@ module PQCrypto
         max_envelope_bytes: DEFAULT_MAX_ENVELOPE_BYTES
       }.freeze
 
+      HEADER_PREFIX_BYTES = MAGIC.bytesize + 1 + 4
+      INNER_PREFIX_BYTES = 14
+
       Header = Struct.new(
         :raw, :content_suite_id, :lookup_mode, :flags, :padding_policy_id,
         :payload_id, :payload_nonce, :recipient_capacity, :slot_size,
         :padded_inner_length, :public_metadata,
         keyword_init: true
       )
-      Section = Struct.new(:wrap_suite_id, :section_id, :raw, :slots_offset, :slots_length, keyword_init: true)
+
+      Section = Struct.new(
+        :wrap_suite_id, :section_id, :raw, :slots_offset, :slots_length,
+        keyword_init: true
+      )
+
+      VerifiedInner = Struct.new(:content, :metadata, :padding_bytes, keyword_init: true)
 
       SLOT_FIELDS = [
         [:hint, HINT_BYTES],
@@ -80,121 +79,194 @@ module PQCrypto
         [:wrap_tag, TAG_BYTES]
       ].freeze
 
+      class HeaderCodec
+        class << self
+          def build(payload_id:, payload_nonce:, recipient_capacity:, slot_size:,
+                    padded_inner_length:, public_metadata:, padding_policy_id:)
+            public_metadata = String(public_metadata).b
+            validate_build_input!(
+              payload_id, payload_nonce, public_metadata, padding_policy_id
+            )
+
+            body = [
+              Binary.u16(CONTENT_SUITE_AEGIS256),
+              Binary.u8(LOOKUP_HINT),
+              Binary.u16(FLAGS),
+              Binary.u8(padding_policy_id),
+              payload_id,
+              payload_nonce,
+              Binary.u16(recipient_capacity),
+              Binary.u16(slot_size),
+              Binary.u64(padded_inner_length),
+              Binary.u32(public_metadata.bytesize),
+              public_metadata
+            ].join.b
+
+            header = MAGIC + Binary.u8(VERSION) + Binary.u32(HEADER_PREFIX_BYTES + body.bytesize) + body
+            raise InvalidConfigurationError, "header is too large" if header.bytesize > MAX_HEADER_BYTES
+
+            header
+          end
+
+          def parse(bytes)
+            source = String(bytes).b
+            prefix = Binary::Reader.new(source)
+            expect!(prefix.bytes(MAGIC.bytesize), MAGIC, "invalid envelope magic")
+            expect!(prefix.u8, VERSION, "unsupported format version")
+            header_length = prefix.u32
+            validate_header_length!(header_length, prefix.offset)
+
+            Binary.ensure_available!(source, 0, header_length)
+            raw = source.byteslice(0, header_length).b
+            fields = Binary::Reader.new(raw, prefix.offset)
+
+            content_suite = fields.u16
+            expect_suite!(content_suite, CONTENT_SUITE_AEGIS256, "content")
+            lookup_mode = fields.u8
+            expect_suite!(lookup_mode, LOOKUP_HINT, "lookup mode")
+            flags = fields.u16
+            expect!(flags, FLAGS, "unknown header flags")
+            padding_policy_id = Format.validate_padding_policy_id!(fields.u8, error: FormatError)
+            payload_id = fields.bytes(PAYLOAD_ID_BYTES)
+            payload_nonce = fields.bytes(NONCE_BYTES)
+            capacity = Format.validate_capacity!(fields.u16, error: FormatError)
+            slot_size = Format.validate_slot_size!(fields.u16, error: FormatError)
+            padded_inner_length = fields.u64
+            raise FormatError, "padded inner frame is too short" if padded_inner_length < INNER_PREFIX_BYTES
+
+            public_length = fields.u32
+            raise FormatError, "public metadata is too large" if public_length > MAX_PUBLIC_METADATA_BYTES
+            public_metadata = fields.bytes(public_length)
+            raise FormatError, "non-canonical header length" unless fields.finished?
+
+            Header.new(
+              raw: raw,
+              content_suite_id: content_suite,
+              lookup_mode: lookup_mode,
+              flags: flags,
+              padding_policy_id: padding_policy_id,
+              payload_id: payload_id,
+              payload_nonce: payload_nonce,
+              recipient_capacity: capacity,
+              slot_size: slot_size,
+              padded_inner_length: padded_inner_length,
+              public_metadata: public_metadata
+            )
+          end
+
+          private
+
+          def validate_build_input!(payload_id, payload_nonce, public_metadata, padding_policy_id)
+            raise InvalidConfigurationError, "public metadata is too large" if public_metadata.bytesize > MAX_PUBLIC_METADATA_BYTES
+            raise InvalidConfigurationError, "invalid payload_id" unless payload_id.bytesize == PAYLOAD_ID_BYTES
+            raise InvalidConfigurationError, "invalid payload nonce" unless payload_nonce.bytesize == NONCE_BYTES
+
+            Format.validate_padding_policy_id!(padding_policy_id, error: InvalidConfigurationError)
+          end
+
+          def validate_header_length!(length, minimum)
+            return if length.between?(minimum, MAX_HEADER_BYTES)
+
+            raise FormatError, "invalid header length"
+          end
+
+          def expect!(actual, expected, message)
+            return if actual == expected
+
+            suffix = message.start_with?("unsupported") ? " #{actual}" : ""
+            raise FormatError, "#{message}#{suffix}"
+          end
+
+          def expect_suite!(actual, expected, label)
+            return if actual == expected
+
+            raise UnsupportedSuiteError, "unsupported #{label} #{actual}"
+          end
+        end
+      end
+
+      class SectionCodec
+        class << self
+          def parse(bytes, offset, header)
+            raw, = Binary.read_bytes(bytes, offset, Format.section_length(header))
+            reader = Binary::Reader.new(raw)
+            wrap_suite = reader.u16
+            unless wrap_suite == WRAP_SUITE_MLKEM768_X25519_AEGIS256
+              raise UnsupportedSuiteError, "unsupported wrap suite #{wrap_suite}"
+            end
+
+            section_id = reader.bytes(SECTION_ID_BYTES)
+            Section.new(
+              wrap_suite_id: wrap_suite,
+              section_id: section_id,
+              raw: raw,
+              slots_offset: reader.offset,
+              slots_length: raw.bytesize - reader.offset
+            )
+          end
+        end
+      end
+
+      class InnerCodec
+        class << self
+          def prefix(content_length, metadata_length)
+            Binary.u8(INNER_VERSION) + Binary.u8(INNER_FLAGS) +
+              Binary.u64(content_length) + Binary.u32(metadata_length)
+          end
+
+          def parse(bytes)
+            source = String(bytes).b
+            reader = Binary::Reader.new(source)
+            raise FormatError, "unsupported inner version" unless reader.u8 == INNER_VERSION
+            raise FormatError, "unknown inner flags" unless reader.u8 == INNER_FLAGS
+
+            content_length = reader.u64
+            metadata_length = reader.u32
+            raise FormatError, "private metadata is too large" if metadata_length > MAX_PRIVATE_METADATA_BYTES
+
+            metadata = reader.bytes(metadata_length)
+            content = reader.bytes(content_length)
+            VerifiedInner.new(
+              content: content,
+              metadata: metadata,
+              padding_bytes: source.bytesize - reader.offset
+            )
+          end
+        end
+      end
+
       module_function
 
       def validate_slot_size!(slot_size, error: InvalidConfigurationError)
-        n = Integer(slot_size)
-        unless n.between?(MIN_SLOT_SIZE, MAX_SLOT_SIZE) && (n % SLOT_GRANULARITY).zero?
-          raise error, "slot_size must be #{MIN_SLOT_SIZE}..#{MAX_SLOT_SIZE} and divisible by #{SLOT_GRANULARITY}"
-        end
-        raise error, "slot_size is too small for current wrap suite" if n < STANZA_BYTES
-        n
+        size = Integer(slot_size)
+        valid = size.between?(MIN_SLOT_SIZE, MAX_SLOT_SIZE) && (size % SLOT_GRANULARITY).zero?
+        raise error, "slot_size must be #{MIN_SLOT_SIZE}..#{MAX_SLOT_SIZE} and divisible by #{SLOT_GRANULARITY}" unless valid
+        raise error, "slot_size is too small for current wrap suite" if size < STANZA_BYTES
+
+        size
       end
 
       def validate_capacity!(capacity, recipient_count = nil, error: InvalidConfigurationError)
-        n = Integer(capacity)
-        unless n.between?(1, MAX_RECIPIENT_CAPACITY)
-          raise error, "recipient_capacity must be 1..#{MAX_RECIPIENT_CAPACITY}"
-        end
-        if recipient_count && recipient_count > n
-          raise RecipientCapacityExceeded, "#{recipient_count} recipients do not fit capacity #{n}"
-        end
-        n
+        value = Integer(capacity)
+        raise error, "recipient_capacity must be 1..#{MAX_RECIPIENT_CAPACITY}" unless value.between?(1, MAX_RECIPIENT_CAPACITY)
+        raise RecipientCapacityExceeded, "#{recipient_count} recipients do not fit capacity #{value}" if recipient_count && recipient_count > value
+
+        value
       end
 
-      def validate_slot_size_from_wire!(slot_size)
-        validate_slot_size!(slot_size, error: FormatError)
+      def validate_padding_policy_id!(policy_id, error: FormatError)
+        value = Integer(policy_id)
+        raise error, "unsupported padding policy id #{value}" unless PADDING_POLICY_IDS.include?(value)
+
+        value
       end
 
-      def validate_capacity_from_wire!(capacity)
-        validate_capacity!(capacity, error: FormatError)
-      end
-
-      def validate_padding_policy_id!(policy_id)
-        n = Integer(policy_id)
-        raise FormatError, "unsupported padding policy id #{n}" unless PADDING_POLICY_IDS.key?(n)
-        n
-      end
-
-      def padding_policy_id_for(policy)
-        return PADDING_POLICY_BY_SYMBOL.fetch(policy) if PADDING_POLICY_BY_SYMBOL.key?(policy)
-        case policy
-        when :preserve
-          raise InvalidConfigurationError, "padding: :preserve is only valid for rotate_dek"
-        when Hash
-          return PADDING_FIXED if policy.key?(:to)
-          return PADDING_BUCKETS if policy.key?(:buckets)
-          raise InvalidConfigurationError, "padding hash must contain :to or :buckets"
-        else
-          raise InvalidConfigurationError, "unsupported padding policy: #{policy.inspect}"
-        end
-      end
-
-      def build_header(payload_id:, payload_nonce:, recipient_capacity:, slot_size:,
-                       padded_inner_length:, public_metadata:, padding_policy_id:)
-        public_metadata = String(public_metadata).b
-        raise InvalidConfigurationError, "public metadata is too large" if public_metadata.bytesize > MAX_PUBLIC_METADATA_BYTES
-        raise InvalidConfigurationError, "invalid payload_id" unless payload_id.bytesize == PAYLOAD_ID_BYTES
-        raise InvalidConfigurationError, "invalid payload nonce" unless payload_nonce.bytesize == NONCE_BYTES
-        validate_padding_policy_id!(padding_policy_id)
-
-        body = +"".b
-        body << Binary.u16(CONTENT_SUITE_AEGIS256)
-        body << Binary.u8(LOOKUP_HINT)
-        body << Binary.u16(FLAGS)
-        body << Binary.u8(Integer(padding_policy_id))
-        body << payload_id
-        body << payload_nonce
-        body << Binary.u16(recipient_capacity)
-        body << Binary.u16(slot_size)
-        body << Binary.u64(padded_inner_length)
-        body << Binary.u32(public_metadata.bytesize)
-        body << public_metadata
-        header = MAGIC + Binary.u8(VERSION) + Binary.u32(MAGIC.bytesize + 1 + 4 + body.bytesize) + body
-        raise InvalidConfigurationError, "header is too large" if header.bytesize > MAX_HEADER_BYTES
-        header
+      def build_header(**attributes)
+        HeaderCodec.build(**attributes)
       end
 
       def parse_header(bytes)
-        bytes = String(bytes).b
-        offset = 0
-        magic, offset = Binary.read_bytes(bytes, offset, MAGIC.bytesize)
-        raise FormatError, "invalid envelope magic" unless magic == MAGIC
-        version, offset = Binary.read_u8(bytes, offset)
-        raise FormatError, "unsupported format version #{version}" unless version == VERSION
-        header_length, offset = Binary.read_u32(bytes, offset)
-        raise FormatError, "invalid header length" if header_length < offset || header_length > MAX_HEADER_BYTES
-        Binary.ensure_available!(bytes, 0, header_length)
-        raw = bytes.byteslice(0, header_length).b
-
-        content_suite, offset = Binary.read_u16(raw, offset)
-        raise UnsupportedSuiteError, "unsupported content suite #{content_suite}" unless content_suite == CONTENT_SUITE_AEGIS256
-        lookup_mode, offset = Binary.read_u8(raw, offset)
-        raise UnsupportedSuiteError, "unsupported lookup mode #{lookup_mode}" unless lookup_mode == LOOKUP_HINT
-        flags, offset = Binary.read_u16(raw, offset)
-        raise FormatError, "unknown header flags" unless flags == FLAGS
-        padding_policy_id, offset = Binary.read_u8(raw, offset)
-        validate_padding_policy_id!(padding_policy_id)
-        payload_id, offset = Binary.read_bytes(raw, offset, PAYLOAD_ID_BYTES)
-        payload_nonce, offset = Binary.read_bytes(raw, offset, NONCE_BYTES)
-        capacity, offset = Binary.read_u16(raw, offset)
-        validate_capacity_from_wire!(capacity)
-        slot_size, offset = Binary.read_u16(raw, offset)
-        validate_slot_size_from_wire!(slot_size)
-        padded_inner_length, offset = Binary.read_u64(raw, offset)
-        raise FormatError, "padded inner frame is too short" if padded_inner_length < 14
-        public_length, offset = Binary.read_u32(raw, offset)
-        raise FormatError, "public metadata is too large" if public_length > MAX_PUBLIC_METADATA_BYTES
-        public_metadata, offset = Binary.read_bytes(raw, offset, public_length)
-        raise FormatError, "non-canonical header length" unless offset == raw.bytesize
-
-        Header.new(
-          raw: raw, content_suite_id: content_suite, lookup_mode: lookup_mode,
-          flags: flags, padding_policy_id: padding_policy_id,
-          payload_id: payload_id, payload_nonce: payload_nonce,
-          recipient_capacity: capacity, slot_size: slot_size,
-          padded_inner_length: padded_inner_length, public_metadata: public_metadata
-        )
+        HeaderCodec.parse(bytes)
       end
 
       def section_length(header)
@@ -205,70 +277,26 @@ module PQCrypto
         2 + SECTION_ID_BYTES + Integer(capacity) * Integer(slot_size)
       end
 
+      def parse_section(bytes, offset, header)
+        SectionCodec.parse(bytes, offset, header)
+      end
+
       def split_slot(slot, slot_size)
-        fields = {}
-        offset = 0
-        SLOT_FIELDS.each do |name, length|
-          fields[name] = slot.byteslice(offset, length)
-          offset += length
+        reader = Binary::Reader.new(slot)
+        fields = SLOT_FIELDS.each_with_object({}) do |(name, length), result|
+          result[name] = reader.bytes(length)
         end
-        fields[:padding] = slot.byteslice(offset, slot_size - offset)
+        fields[:padding] = reader.bytes(Integer(slot_size) - reader.offset)
         fields
       end
 
-      def parse_section(bytes, offset, header)
-        length = section_length(header)
-        raw, = Binary.read_bytes(bytes, offset, length)
-        wrap_suite, slot_offset = Binary.read_u16(raw, 0)
-        section_id, slot_offset = Binary.read_bytes(raw, slot_offset, SECTION_ID_BYTES)
-        unless wrap_suite == WRAP_SUITE_MLKEM768_X25519_AEGIS256
-          raise UnsupportedSuiteError, "unsupported wrap suite #{wrap_suite}"
-        end
-        Section.new(
-          wrap_suite_id: wrap_suite, section_id: section_id, raw: raw,
-          slots_offset: slot_offset, slots_length: raw.bytesize - slot_offset
-        )
-      end
-
       def inner_prefix(content_length, private_metadata_length)
-        Binary.u8(INNER_VERSION) + Binary.u8(INNER_FLAGS) +
-          Binary.u64(content_length) + Binary.u32(private_metadata_length)
+        InnerCodec.prefix(content_length, private_metadata_length)
       end
 
       def parse_verified_inner(bytes)
-        bytes = String(bytes).b
-        offset = 0
-        version, offset = Binary.read_u8(bytes, offset)
-        raise FormatError, "unsupported inner version" unless version == INNER_VERSION
-        flags, offset = Binary.read_u8(bytes, offset)
-        raise FormatError, "unknown inner flags" unless flags == INNER_FLAGS
-        content_length, offset = Binary.read_u64(bytes, offset)
-        metadata_length, offset = Binary.read_u32(bytes, offset)
-        raise FormatError, "private metadata is too large" if metadata_length > MAX_PRIVATE_METADATA_BYTES
-        metadata, offset = Binary.read_bytes(bytes, offset, metadata_length)
-        content, offset = Binary.read_bytes(bytes, offset, content_length)
-        [content, metadata, bytes.bytesize - offset]
-      end
-
-      def check_resource_limits!(padded_inner_length:, envelope_bytes: nil,
-                                 max_staging_bytes: DEFAULT_MAX_STAGING_BYTES,
-                                 max_envelope_bytes: DEFAULT_MAX_ENVELOPE_BYTES)
-        if padded_inner_length > Integer(max_staging_bytes)
-          raise ResourceLimitError,
-                "padded_inner_length #{padded_inner_length} exceeds max_staging_bytes #{max_staging_bytes}"
-        end
-        if envelope_bytes && envelope_bytes > Integer(max_envelope_bytes)
-          raise ResourceLimitError,
-                "envelope #{envelope_bytes} exceeds max_envelope_bytes #{max_envelope_bytes}"
-        end
-        true
-      end
-
-      def pre_auth_limits(limits)
-        {
-          max_staging_bytes: limits.fetch(:max_staging_bytes, DEFAULT_MAX_STAGING_BYTES),
-          max_envelope_bytes: limits.fetch(:max_envelope_bytes, DEFAULT_MAX_ENVELOPE_BYTES)
-        }
+        inner = InnerCodec.parse(bytes)
+        [inner.content, inner.metadata, inner.padding_bytes]
       end
     end
   end

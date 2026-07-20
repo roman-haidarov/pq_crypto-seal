@@ -2,6 +2,7 @@
 
 require "rake/testtask"
 require "rake/extensiontask"
+require "bundler/gem_tasks"
 require_relative "lib/pq_crypto/seal/version"
 
 Rake::ExtensionTask.new("pq_crypto_seal", Gem::Specification.load("pq_crypto-seal.gemspec")) do |ext|

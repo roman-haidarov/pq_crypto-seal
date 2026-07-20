@@ -131,9 +131,18 @@ slot_size:          2048 bytes (configurable 2048..8192, multiple of 256)
 recipient_capacity: 4 (maximum 32; never derived automatically from ACL size)
 padding:            Padmé over the complete final envelope size
 max_staging_bytes:  ~1 GiB + private-metadata ceiling
-max_plaintext_bytes:~1 GiB
+max_plaintext_bytes:64 MiB by default
 ```
 
 Parsers reject trailing bytes on the one-shot and default IO paths. Framed
 stream consumers that intentionally embed one envelope inside a larger stream
 must use `encrypt_frame_io` / `decrypt_frame_io`.
+
+
+## Receiver-side padding checks (0.1.1+)
+
+`padding_policy_id` is authenticated but does not by itself encode fixed targets
+or bucket lists. Decryptors that need enforcement pass `required_padding:`. The
+receiver verifies the authenticated policy id and recomputes the canonical target
+from the authenticated inner lengths. Fixed and bucket policies require the
+expected target or bucket list from the application.

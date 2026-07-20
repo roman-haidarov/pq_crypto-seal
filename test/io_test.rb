@@ -122,4 +122,56 @@ class IOTest < Minitest::Test
       refute File.exist?(destination)
     end
   end
+
+  class PartialWriter
+    def initialize(limit: 7)
+      @limit = limit
+      @buf = +"".b
+    end
+    attr_reader :buf
+    def write(data)
+      data = data.to_s.b
+      take = [data.bytesize, @limit].min
+      return 0 if take.zero? && !data.empty?
+      @buf << data.byteslice(0, take)
+      take
+    end
+    def binmode; self; end
+    def flush; self; end
+  end
+
+  def test_encrypt_io_survives_partial_writes
+    kp = PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)
+    src = StringIO.new("hello-partial-write-world")
+    out = PartialWriter.new(limit: 7)
+    PQCrypto::Seal.encrypt_io(src, out, size: src.string.bytesize, to: kp.public_key, padding: :none)
+    assert out.buf.bytesize > 32
+    assert_equal "hello-partial-write-world", PQCrypto::Seal.decrypt(out.buf, with: kp)
+  end
+
+  def test_decrypt_io_survives_partial_writes
+    data = "decrypted-partial-write" * 500
+    envelope = PQCrypto::Seal.encrypt(data, to: @keypair.public_key, padding: :none)
+    output = PartialWriter.new(limit: 5)
+
+    PQCrypto::Seal.decrypt_io(StringIO.new(envelope), output, with: @keypair)
+
+    assert_equal data, output.buf
+  end
+
+  class StalledWriter
+    def write(_data)
+      0
+    end
+  end
+
+  def test_encrypt_io_rejects_writer_without_progress
+    input = StringIO.new("x")
+    assert_raises(IOError) do
+      PQCrypto::Seal.encrypt_io(
+        input, StalledWriter.new, size: 1, to: @keypair.public_key, padding: :none
+      )
+    end
+  end
+
 end

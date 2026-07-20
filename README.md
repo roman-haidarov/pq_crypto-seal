@@ -12,10 +12,10 @@ random DEK → AEGIS-256 → document
 `libaegis` 0.10.3 is vendored and compiled into the extension. The existing
 `pq_crypto` gem supplies the hybrid KEM and OpenSSL-backed primitives.
 
-> **Status:** 0.1.0 is experimental cryptographic software; format v1; not
+> **Status:** 0.1.1 is experimental cryptographic software; format v1; not
 > independently audited. Read `SECURITY.md` before using it for irreplaceable data.
 >
-> `wrap_suite_id = 1` is pinned to `:ml_kem_768_x25519_xwing` and `pq_crypto ~> 0.6.4`.
+> `wrap_suite_id = 1` is pinned to `:ml_kem_768_x25519_xwing` and `pq_crypto = 0.6.4`.
 
 ## Installation
 
@@ -129,7 +129,7 @@ rotated = PQCrypto::Seal.rotate_dek(
 
 `rebuild_recipients` preserves the DEK and encrypted payload. It is an
 operational migration of the current canonical copy, not protection against old
-saved envelopes. `rotate_dek` creates a new DEK and re-encrypts the payload; it
+saved envelopes. `rotate_dek` creates a new DEK, a **new payload_id**, and re-encrypts the payload; it
 still cannot erase knowledge from prior copies. Rotation preserves the current
 final envelope size by default (`padding: :preserve`); pass `:padme`, `:none`, or
 an explicit padding policy to recalculate it.
@@ -213,3 +213,19 @@ Set `PQC_SEAL_SANITIZE=1` when compiling under ASan/UBSan. The suite covers
 AEGIS one-shot/incremental equivalence, tampering, multi-recipient opening,
 full-envelope padding, recipient rebuilds, staged file publication, and parser
 limits.
+
+
+## Padding enforcement on decrypt
+
+After AEAD verification you may require a padding policy:
+
+```ruby
+PQCrypto::Seal.decrypt(envelope, with: credentials, required_padding: :padme)
+PQCrypto::Seal.decrypt(envelope, with: credentials, required_padding: :from_header)
+PQCrypto::Seal.decrypt(envelope, with: credentials, required_padding: { to: 4096 })
+```
+
+Omitting `required_padding` keeps padding enforcement optional. When supplied,
+the decryptor verifies both the authenticated policy id and the canonical target
+computed from the authenticated content and metadata lengths. Fixed and bucket
+policies require the expected target or bucket list from the application.

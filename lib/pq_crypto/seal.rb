@@ -5,9 +5,17 @@ require "pq_crypto/seal/version"
 require "pq_crypto/seal/errors"
 require "pq_crypto/seal/native"
 require "pq_crypto/seal/binary"
-require "pq_crypto/seal/padding"
 require "pq_crypto/seal/format"
+require "pq_crypto/seal/models"
+require "pq_crypto/seal/secrets"
+require "pq_crypto/seal/resource_limits"
+require "pq_crypto/seal/padding"
+require "pq_crypto/seal/recipients"
+require "pq_crypto/seal/envelope"
 require "pq_crypto/seal/core"
+require "pq_crypto/seal/io_helpers"
+require "pq_crypto/seal/streaming"
+require "pq_crypto/seal/files"
 require "pq_crypto/seal/io"
 
 module PQCrypto
@@ -21,12 +29,16 @@ module PQCrypto
 
     class << self
       IO_DELEGATES.each do |name|
-        define_method(name) do |*args, **kwargs|
-          IOAPI.public_send(name, *args, **kwargs)
-        end
+        define_method(name) { |*args, **kwargs| IOAPI.public_send(name, *args, **kwargs) }
       end
     end
 
-    private_constant :Native
+    private_constant :Native, :Secrets, :KeyMaterial, :WrapSuiteV1,
+                     :RecipientSectionBuilder, :RecipientSectionOpener,
+                     :EncryptionPlan, :Envelope, :ResourceLimits,
+                     :IOHelpers, :AtomicDestination, :StreamEnvelope,
+                     :StreamingEncryptor, :StagedInner, :VerifiedStream,
+                     :AuthenticatedStaging, :StreamingDecryptor,
+                     :FileRecipientRebuilder, :FileDekRotator, :FileOperations
   end
 end

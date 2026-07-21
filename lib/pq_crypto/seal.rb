@@ -23,7 +23,7 @@ module PQCrypto
     IO_DELEGATES = %i[
       encrypt_io decrypt_io encrypt_frame_io decrypt_frame_io
       encrypt_file decrypt_file rebuild_recipients_file
-      add_recipient_file drop_recipient_stanza_file rotate_dek_file
+      add_recipient_file rotate_dek_file
       inspect_file
     ].freeze
 

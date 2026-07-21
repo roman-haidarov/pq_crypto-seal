@@ -3,13 +3,15 @@
 1. Run `bundle exec ruby script/vendor_libs.rb --check`.
 2. Confirm `pq_crypto` dependency remains `= 0.6.4` and `WRAP_KEM_ALGORITHM`
    is still `:ml_kem_768_x25519_xwing` with the documented sizes.
-3. Run the full CI matrix and sanitizer job.
-4. Build with `gem build pq_crypto-seal.gemspec`.
-5. Install the exact built gem into an empty `GEM_HOME` together with the
+3. Run `bundle exec ruby script/release_contract_check.rb` (also enforced in CI).
+4. Run the full CI matrix: test, sanitize, fuzz, release_contract, gem-smoke.
+5. Build with `gem build pq_crypto-seal.gemspec`.
+6. Re-run the release-contract checker against the built gem path.
+7. Install the exact built gem into an empty `GEM_HOME` together with the
    supported `pq_crypto` gem and run String and File round trips.
-6. Confirm golden envelope vectors and pinned X-Wing wire-contract checks in
-   `test/golden_vectors_test.rb` pass, and that the CI fuzz job is green.
-7. Publish only from a signed tag through RubyGems Trusted Publishing.
+8. Confirm golden envelope vectors, X-Wing draft-10 KATs, and AEGIS draft-18
+   KATs pass, and that the CI fuzz job is green.
+9. Publish only from a signed tag through RubyGems Trusted Publishing.
 
 Vendored libaegis sources are pinned by archive SHA-256 and a deterministic
 source-tree digest (`vendor/libaegis/TREE_SHA256`). The full upstream snapshot

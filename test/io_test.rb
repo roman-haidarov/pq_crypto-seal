@@ -66,7 +66,10 @@ class IOTest < Minitest::Test
       )
       assert_equal rebuilt_size, File.size(rotated)
       refute_equal PQCrypto::Seal.digest(File.binread(rebuilt)), PQCrypto::Seal.digest(File.binread(rotated))
-      PQCrypto::Seal.decrypt_file(rotated, output, with: bob)
+
+      PQCrypto::Seal.decrypt_file(
+        rotated, output, with: bob, required_padding: { to: rebuilt_size }
+      )
       assert_equal data, File.binread(output)
     end
   end
@@ -157,6 +160,42 @@ class IOTest < Minitest::Test
     PQCrypto::Seal.decrypt_io(StringIO.new(envelope), output, with: @keypair)
 
     assert_equal data, output.buf
+  end
+
+  def test_decrypt_io_rejects_bad_tag_without_publishing
+    data = "secret-staging" * 10_000
+    envelope = PQCrypto::Seal.encrypt(data, to: @keypair.public_key, padding: :none)
+    broken = envelope.dup
+    broken.setbyte(broken.bytesize - 1, broken.getbyte(-1) ^ 1)
+    output = StringIO.new("".b)
+    assert_raises(PQCrypto::Seal::AuthenticationError) do
+      PQCrypto::Seal.decrypt_io(StringIO.new(broken), output, with: @keypair)
+    end
+    assert_equal "".b, output.string
+  end
+
+  def test_rotate_dek_file_can_grow_capacity
+    bob = PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)
+    Dir.mktmpdir do |dir|
+      source = File.join(dir, "source")
+      sealed = File.join(dir, "sealed")
+      rotated = File.join(dir, "rotated")
+      output = File.join(dir, "output")
+      File.binwrite(source, "capacity-grow")
+      PQCrypto::Seal.encrypt_file(
+        source, sealed, to: @keypair.public_key, recipient_capacity: 1, padding: :none
+      )
+      PQCrypto::Seal.rotate_dek_file(
+        sealed, rotated, with: @keypair,
+        recipients: [@keypair.public_key, bob.public_key],
+        recipient_capacity: 4,
+        padding: :none
+      )
+      info = PQCrypto::Seal.inspect_file(rotated)
+      assert_equal 4, info.recipient_capacity
+      PQCrypto::Seal.decrypt_file(rotated, output, with: bob)
+      assert_equal "capacity-grow", File.binread(output)
+    end
   end
 
   class StalledWriter

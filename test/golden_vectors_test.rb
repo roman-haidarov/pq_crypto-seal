@@ -3,29 +3,11 @@
 require "json"
 require_relative "test_helper"
 
-# Protocol-drift detection for the frozen v1 wire format.
-#
-# A fully byte-frozen "plaintext -> exact envelope" vector is not achievable
-# from this gem alone, because X-Wing encapsulation draws its own randomness
-# inside pq_crypto and is not injectable here. Instead this suite pins every
-# part of the construction that Seal itself controls and every derived value
-# that would change if the protocol silently drifted:
-#
-#   * the X-Wing wire contract (algorithm id + exact key/ciphertext/secret sizes)
-#   * the exact immutable-header byte layout for a fixed input
-#   * the payload associated data derivation (SHA-256 of the header)
-#   * the KDF label wiring and slot offsets
-#   * one-shot and incremental encryption producing identical bytes under a
-#     fixed deterministic RNG
-#
-# Any change to labels, offsets, field order, or hashing breaks these.
 class GoldenVectorsTest < Minitest::Test
   def native
     PQCrypto::Seal.const_get(:Native, false)
   end
 
-  # Deterministic counter-based byte stream so every Seal-side random draw
-  # (payload id, nonces, DEK, section id, padding) is fixed across a run.
   class CountingRandom
     def initialize(seed, native)
       @state = [seed].pack("Q>")
@@ -102,8 +84,7 @@ class GoldenVectorsTest < Minitest::Test
     keypair = PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)
     envelope = PQCrypto::Seal.encrypt("data", to: keypair.public_key, padding: :none)
     header = PQCrypto::Seal::Format.parse_header(envelope)
-    # The recipient can open the envelope, which only succeeds if the AD used
-    # for the payload equals SHA-256(header.raw); a drifted AD fails the tag.
+
     opened = PQCrypto::Seal.open(envelope, with: keypair)
     assert_equal "data", opened.data
     refute_equal native.sha256(header.raw), header.raw
@@ -111,14 +92,6 @@ class GoldenVectorsTest < Minitest::Test
   end
 
   def test_one_shot_and_incremental_agree_on_deterministic_regions
-    # X-Wing encapsulation randomness lives inside pq_crypto and is NOT covered
-    # by the Native.random_bytes stub, so the recipient section (KEM ciphertexts)
-    # differs between two runs. Everything Seal itself controls must still match:
-    # the immutable header and the payload ciphertext+tag.
-    #
-    # padding MUST be :none: one-shot draws padding as one random_bytes call, the
-    # IO path draws it in chunk_size pieces, which would diverge under the same
-    # deterministic RNG. With :none both draw zero padding bytes.
     keypair = PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)
     data = ("payload" * 5000).b
 
@@ -145,19 +118,13 @@ class GoldenVectorsTest < Minitest::Test
     header_a = fmt.parse_header(one_shot)
     header_b = fmt.parse_header(incremental)
 
-    # Immutable header bytes are fully deterministic and must be identical.
     assert_equal header_a.raw, header_b.raw,
                  "one-shot and incremental must build identical headers"
-
-    # Payload region (ciphertext + tag) is deterministic given a fixed DEK,
-    # nonce, and header hash; extract and compare it across both paths.
     section_len = fmt.section_length(header_a)
     payload_a = one_shot.byteslice(header_a.raw.bytesize + section_len..)
     payload_b = incremental.byteslice(header_b.raw.bytesize + section_len..)
     assert_equal payload_a, payload_b,
                  "one-shot and incremental must produce identical payload bytes"
-
-    # Both envelopes must open to the exact plaintext.
     assert_equal data, PQCrypto::Seal.decrypt(one_shot, with: keypair)
     assert_equal data, PQCrypto::Seal.decrypt(incremental, with: keypair)
   end
@@ -177,7 +144,6 @@ class GoldenVectorsTest < Minitest::Test
     info = PQCrypto::Seal.inspect_envelope(envelope)
     assert_equal 4, info.recipient_capacity
     assert_equal PQCrypto::Seal::Format::PADDING_PADME, info.padding_policy_id
-    # Padmé targets the full envelope, so the total size equals the Padmé target.
     assert_equal PQCrypto::Seal::Padding.padme_target(info.envelope_bytes),
                  info.envelope_bytes
   end

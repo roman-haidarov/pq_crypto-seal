@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.1.2
+
+### Security
+
+- **Default padding enforcement on decrypt.** `decrypt` / `open` / `decrypt_io` /
+  `decrypt_file` now default to `required_padding: :from_header`. Padmé / none
+  get a full canonical size check from authenticated lengths. Fixed / buckets
+  are not self-describing on the wire, so `:from_header` only accepts the
+  authenticated policy id (envelope still opens); pass
+  `required_padding: { to: N }` / `{ buckets: [...] }` for full target
+  enforcement. Pass `required_padding: false` to opt out entirely.
+- **RUP-safe IO staging.** `decrypt_io` / `decrypt_file` / DEK rotation stage
+  **ciphertext** on the temporary 0600 file and only materialise plaintext after
+  the AEGIS tag verifies (second pass). Unauthenticated plaintext is no longer
+  written to disk before authentication.
+- **Honest recipient ACL API.** Removed `drop_recipient_stanza` and
+  `drop_recipient_stanza_file`. Those names suggested revocation while old copies
+  and the DEK remain valid. Use `rebuild_recipients` / `rebuild_recipients_file`
+  with the application's complete authoritative ACL for the current canonical
+  copy only; use `rotate_dek` when a new payload key is required.
+- **Capacity / slot growth path.** `recipient_capacity` and `slot_size` remain
+  immutable in the payload header for a given envelope, but `rotate_dek` /
+  `rotate_dek_file` now accept optional `recipient_capacity:` and `slot_size:`
+  overrides because they re-encrypt the authenticated plaintext under a new DEK.
+- **At-rest draft pinning documented.** SECURITY.md / FORMAT.md / VENDORING.md
+  state that suite 1 and content suite 1 are pinned to X-Wing draft-10 and
+  AEGIS-256 (IETF CFRG draft-18 vectors via libaegis 0.10.3), not to future RFC
+  text. External KATs are referenced; self-generated golden vectors pin Seal's
+  own wire layout only.
+- **CI / release hygiene matched to claims.** Workflow Actions pinned by full
+  commit SHA, top-level `permissions: contents: read`, and jobs for fuzz,
+  gem-smoke, and `release_contract_check`. `.DS_Store` is gitignored; the
+  release-contract checker rejects tracked copies.
+
+### Breaking (0.1.x experimental)
+
+- Default `required_padding` is `:from_header` (was effectively off / `nil`).
+- `drop_recipient_stanza` / `drop_recipient_stanza_file` removed from the public API.
+
 ## 0.1.1
 
 - Release hygiene: CI Actions pinned by commit SHA, `permissions: contents: read`,

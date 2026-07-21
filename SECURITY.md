@@ -1,7 +1,7 @@
 # Security
 
 This project has not received an independent cryptographic or implementation
-audit. Do not treat version 0.1.1 as a substitute for a reviewed storage design.
+audit. Do not treat version 0.1.2 as a substitute for a reviewed storage design.
 
 Experimental cryptographic software; format v1; not independently audited.
 
@@ -25,10 +25,34 @@ Successful opening does **not** authenticate:
 It does not claim recipient anonymity. Anyone who already knows a candidate
 public key can test for its presence via the scoped recipient hint.
 
-Removing a recipient stanza does not revoke plaintext, a DEK, or an older copy
-already obtained by that recipient. Rebuilding recipient stanzas protects the
-current copy only. Rotating the DEK creates a new protected version but cannot
-remove knowledge from older copies.
+### Recipients, ACL ownership, and non-revocation
+
+The envelope is **not** an authoritative ACL. The application must store and
+synchronise the complete recipient public-key list itself. Every recipient-section
+rewrite (`rebuild_recipients` / `add_recipient` and the `*_file` variants)
+requires that full list and only protects the **current canonical copy**.
+
+Rebuilding the recipient section does **not** revoke:
+
+- plaintext already opened by a removed party
+- the DEK (unchanged across rebuilds)
+- older envelope bytes the removed party already copied
+
+`rotate_dek` allocates a new DEK and a new `payload_id`, re-encrypts the payload,
+and still cannot erase knowledge from prior copies. Treat any former recipient
+who retained an old envelope and their secret key as still able to open that old
+copy.
+
+There is intentionally **no** `drop_recipient_*` API: a “drop” name encourages
+the false belief that access was revoked.
+
+### Capacity and slot size
+
+`recipient_capacity` and `slot_size` are stored in the **immutable** payload
+header and are associated-data for the payload AEAD. They cannot change for a
+given encrypted payload without full re-encryption. Use `rotate_dek` /
+`rotate_dek_file` with optional `recipient_capacity:` / `slot_size:` when the
+application needs a larger slot table after authenticating the current payload.
 
 ## Side channels
 
@@ -47,18 +71,24 @@ responsibility after use.
 
 ## payload_id stability
 
-`payload_id` is stable across `rebuild_recipients` / add / drop operations.
+`payload_id` is stable across `rebuild_recipients` / add operations.
 `rotate_dek` re-encrypts the payload with a fresh DEK and **allocates a new
 `payload_id`** — treat the result as a new document identity. Applications that
 need a stable external id across DEK rotation must track it outside the envelope.
 
 ## Padding policy enforcement
 
-The authenticated header carries `padding_policy_id` only. Receivers that require
-a specific length-hiding policy should pass `required_padding:` to decrypt/open
-(for example `required_padding: :padme` or `required_padding: :from_header`).
-The receiver then checks both the policy id and the canonical target computed from
-authenticated inner lengths. Without that argument the field is informational.
+The authenticated header carries `padding_policy_id`. Decrypt/open APIs default
+to `required_padding: :from_header`:
+
+- Padmé / none — full check of policy id **and** canonical size from
+  authenticated inner lengths
+- fixed / buckets — policy id only (targets are not on the wire); pass
+  `required_padding: { to: N }` or `{ buckets: [...] }` for full target
+  enforcement
+
+Pass `required_padding: false` only when the application deliberately skips
+length-hiding checks.
 
 ## Envelope digests
 
@@ -81,21 +111,36 @@ unbounded staging or disk amplification before the final AEGIS tag fails.
 
 Applications may raise the limits explicitly when larger objects are required.
 
-## Staging
+## Staging (RUP)
 
-Large decryptions stage unauthenticated plaintext in a mode-0600 temporary file.
-On Unix the file is unlinked immediately after opening. The staged bytes are
-never returned or published before the final AEGIS tag is verified. Platforms
-that cannot unlink an open file, filesystem snapshots, and storage-layer
-forensics may still retain remnants; use a suitably protected staging filesystem.
+Large decryptions stage the **ciphertext** inner frame in a mode-0600 temporary
+file. On Unix the file is unlinked immediately after opening. Intermediate AEGIS
+streaming plaintext is wiped in memory and is not written to disk until the
+final tag has verified; only then is verified plaintext materialised for
+parsing and publication. Platforms that cannot unlink an open file, filesystem
+snapshots, and storage-layer forensics may still retain remnants (including
+ciphertext); use a suitably protected staging filesystem.
 
-## Wire suite pinning
+## Wire suite pinning and draft risk
 
-`wrap_suite_id = 1` is permanently bound to MLKEM768-X25519 / X-Wing (draft-10
-compatible) with fixed public-key (1216), ciphertext (1120), and shared-secret
-(32) sizes, as implemented by `pq_crypto = 0.6.4`. Seal does not follow
-`HybridKEM::CANONICAL_ALGORITHM`; a future change of that constant must not
-alter suite 1 wire bytes. Always generate keys with
+At-rest envelopes outlive draft documents. Suite identifiers freeze behaviour
+independent of future RFC text:
+
+| Component | Pin |
+|---|---|
+| `wrap_suite_id = 1` | MLKEM768-X25519 / X-Wing **draft-10** compatible via `pq_crypto = 0.6.4` algorithm `:ml_kem_768_x25519_xwing` (PK 1216, CT 1120, SS 32) |
+| `content_suite_id = 1` | AEGIS-256, 32-byte nonce/tag, inner-frame-v1, via vendored **libaegis 0.10.3** |
+| AEGIS KATs | CFRG AEGIS draft-18 positive/negative vectors in `test/aegis_vectors_test.rb` |
+| X-Wing KATs | draft-10 decapsulation vectors in `test/fixtures/xwing-draft-10-vector-*.json` (see `test/xwing_kat_test.rb`) |
+
+Seal does **not** follow `HybridKEM::CANONICAL_ALGORITHM`; a future change of
+that constant must not alter suite 1 wire bytes. Always generate keys with
 `PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)`.
+
+If a final RFC diverges from these pins, a new suite id (and migration) is
+required; existing `PQCSEAL1` / suite-1 envelopes remain defined by this pin,
+not by later drafts. Envelope golden vectors in `test/golden_vectors_test.rb`
+are generated under a deterministic RNG to pin **Seal-controlled** layout and
+labels; they are not a substitute for the external KEM/AEAD KATs above.
 
 Report vulnerabilities privately to the repository owner.

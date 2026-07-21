@@ -112,8 +112,44 @@ class SealTest < Minitest::Test
     )
     assert_equal envelope.bytesize, rotated.bytesize
     assert_equal "document" * 500, PQCrypto::Seal.decrypt(rotated, with: @bob)
+    assert_equal "document" * 500,
+                 PQCrypto::Seal.decrypt(rotated, with: @bob, required_padding: { to: 20_000 })
     assert_equal PQCrypto::Seal::Format::PADDING_FIXED,
                  PQCrypto::Seal.inspect_envelope(rotated).padding_policy_id
+  end
+
+  def test_rotate_dek_can_change_capacity_and_slot_size
+    envelope = PQCrypto::Seal.encrypt(
+      "grow", to: @alice.public_key, recipient_capacity: 1, slot_size: 2048, padding: :none
+    )
+    rotated = PQCrypto::Seal.rotate_dek(
+      envelope,
+      with: @alice,
+      recipients: [@alice.public_key, @bob.public_key],
+      recipient_capacity: 4,
+      slot_size: 4096,
+      padding: :none
+    )
+    info = PQCrypto::Seal.inspect_envelope(rotated)
+    assert_equal 4, info.recipient_capacity
+    assert_equal 4096, info.slot_size
+    assert_equal "grow", PQCrypto::Seal.decrypt(rotated, with: @bob)
+    assert_equal "grow", PQCrypto::Seal.decrypt(rotated, with: @alice)
+  end
+
+  def test_drop_recipient_stanza_is_not_public
+    refute PQCrypto::Seal.respond_to?(:drop_recipient_stanza)
+    refute PQCrypto::Seal.respond_to?(:drop_recipient_stanza_file)
+  end
+
+  def test_default_required_padding_enforces_header_policy
+    env = PQCrypto::Seal.encrypt("pad-default", to: @alice.public_key, padding: :padme)
+    assert_equal "pad-default", PQCrypto::Seal.decrypt(env, with: @alice)
+    none_env = PQCrypto::Seal.encrypt("none-default", to: @alice.public_key, padding: :none)
+    assert_equal "none-default", PQCrypto::Seal.decrypt(none_env, with: @alice)
+    fixed_env = PQCrypto::Seal.encrypt("fixed-default", to: @alice.public_key, padding: { to: 12_000 })
+    assert_equal "fixed-default", PQCrypto::Seal.decrypt(fixed_env, with: @alice)
+    assert_equal "pad-default", PQCrypto::Seal.decrypt(env, with: @alice, required_padding: false)
   end
 
   def test_capacity_is_fixed_policy
@@ -129,10 +165,13 @@ class SealTest < Minitest::Test
     refute PQCrypto::Seal.respond_to?(:build_slot)
     refute PQCrypto::Seal.respond_to?(:parse_envelope)
     refute PQCrypto::Seal.respond_to?(:wipe_string!)
+    refute PQCrypto::Seal.respond_to?(:drop_recipient_stanza)
     assert PQCrypto::Seal.respond_to?(:encrypt)
     assert PQCrypto::Seal.respond_to?(:decrypt)
     assert PQCrypto::Seal.respond_to?(:open)
     assert PQCrypto::Seal.respond_to?(:digest)
+    assert PQCrypto::Seal.respond_to?(:rebuild_recipients)
+    assert PQCrypto::Seal.respond_to?(:rotate_dek)
   end
 
   def test_resource_limit_rejects_huge_declared_inner
@@ -166,12 +205,25 @@ class SealTest < Minitest::Test
     assert_equal PQCrypto::Seal::Format::PADDING_FIXED,
                  PQCrypto::Seal.inspect_envelope(fixed).padding_policy_id
     assert_equal "x", PQCrypto::Seal.decrypt(fixed, with: @alice)
+    assert_equal "x", PQCrypto::Seal.decrypt(fixed, with: @alice, required_padding: { to: 12_000 })
 
     bucketed = PQCrypto::Seal.encrypt("y", to: @alice.public_key, padding: { buckets: [8_000, 16_000, 32_000] })
     assert_includes [8_000, 16_000, 32_000], bucketed.bytesize
     assert_equal PQCrypto::Seal::Format::PADDING_BUCKETS,
                  PQCrypto::Seal.inspect_envelope(bucketed).padding_policy_id
     assert_equal "y", PQCrypto::Seal.decrypt(bucketed, with: @alice)
+    assert_equal "y", PQCrypto::Seal.decrypt(
+      bucketed, with: @alice, required_padding: { buckets: [8_000, 16_000, 32_000] }
+    )
+  end
+
+  def test_from_header_is_soft_for_parameterized_policies
+    fixed = PQCrypto::Seal.encrypt("soft-fixed", to: @alice.public_key, padding: { to: 12_000 })
+    assert_equal "soft-fixed", PQCrypto::Seal.decrypt(fixed, with: @alice, required_padding: :from_header)
+
+    assert_raises(PQCrypto::Seal::FormatError) do
+      PQCrypto::Seal.decrypt(fixed, with: @alice, required_padding: { to: 24_000 })
+    end
   end
 
   def test_digest_changes_on_recipient_rebuild
@@ -195,8 +247,6 @@ class SealTest < Minitest::Test
   end
 
   def test_index_binding_prevents_naive_slot_duplication
-    # wrap_ad / derive_kek bind slot_index, so byte-copying a real slot into
-    # another index cannot open a second time for the same recipient.
     envelope = PQCrypto::Seal.encrypt(
       "ambig", to: @alice.public_key, recipient_capacity: 2, slot_size: 2048, padding: :none
     )
@@ -210,8 +260,6 @@ class SealTest < Minitest::Test
   end
 
   def test_two_valid_stanzas_for_same_recipient_are_ambiguous
-    # Defense-in-depth: a crafted envelope with two correctly-built slots for
-    # the same public key (different indices) must not pick an arbitrary DEK.
     envelope = PQCrypto::Seal.encrypt(
       "ambig", to: @alice.public_key, recipient_capacity: 2, slot_size: 2048, padding: :none
     )
@@ -234,7 +282,6 @@ class SealTest < Minitest::Test
   ensure
     PQCrypto::Seal.send(:wipe_string!, dek) if defined?(dek)
   end
-
 
   def test_required_padding_padme_accepts_honest_envelope
     env = PQCrypto::Seal.encrypt("pad-ok", to: @alice.public_key, padding: :padme)
@@ -304,5 +351,4 @@ class SealTest < Minitest::Test
     PQCrypto::Seal.send(:wipe_string!, dek) if defined?(dek)
     PQCrypto::Seal.send(:wipe_string!, inner) if defined?(inner)
   end
-
 end

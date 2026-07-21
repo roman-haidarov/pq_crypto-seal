@@ -28,7 +28,7 @@ module PQCrypto
 
       def decrypt_io(input, output, with:, staging_directory: nil,
                      chunk_size: DEFAULT_CHUNK_SIZE, strict_eof: true,
-                     required_padding: nil, **limit_options)
+                     required_padding: :from_header, **limit_options)
         StreamingDecryptor.new(
           input,
           output,
@@ -55,7 +55,7 @@ module PQCrypto
       end
 
       def decrypt_file(source, destination, with:, staging_directory: nil,
-                       chunk_size: DEFAULT_CHUNK_SIZE, required_padding: nil,
+                       chunk_size: DEFAULT_CHUNK_SIZE, required_padding: :from_header,
                        **limit_options)
         FileOperations.decrypt(
           source,
@@ -90,13 +90,10 @@ module PQCrypto
         )
       end
 
-      def drop_recipient_stanza_file(source, destination, with:, remaining_recipients:, **options)
-        rebuild_recipients_file(source, destination, with: with, recipients: remaining_recipients, **options)
-      end
-
       def rotate_dek_file(source, destination, with:, recipients:,
                           padding: :preserve, staging_directory: nil,
-                          chunk_size: DEFAULT_CHUNK_SIZE, **limit_options)
+                          chunk_size: DEFAULT_CHUNK_SIZE,
+                          recipient_capacity: nil, slot_size: nil, **limit_options)
         FileDekRotator.new(
           source,
           destination,
@@ -105,6 +102,8 @@ module PQCrypto
           padding: padding,
           staging_directory: staging_directory,
           chunk_size: chunk_size,
+          recipient_capacity: recipient_capacity,
+          slot_size: slot_size,
           limits: ResourceLimits.resolve(limit_options)
         ).call
       end

@@ -117,12 +117,15 @@ module PQCrypto
     end
 
     class DekRotator
-      def initialize(envelope, credentials:, recipients:, padding:, limits:)
+      def initialize(envelope, credentials:, recipients:, padding:, limits:,
+                     recipient_capacity: nil, slot_size: nil)
         @envelope = Envelope.parse(envelope, limits: limits)
         @credentials = credentials
         @recipients = recipients
         @padding = padding == :preserve ? { to: @envelope.size } : padding
         @limits = limits
+        @recipient_capacity = recipient_capacity
+        @slot_size = slot_size
       end
 
       def call
@@ -135,13 +138,27 @@ module PQCrypto
           to: @recipients,
           metadata: inner.metadata,
           public_metadata: @envelope.header.public_metadata,
-          recipient_capacity: @envelope.header.recipient_capacity,
-          slot_size: @envelope.header.slot_size,
+          recipient_capacity: capacity_for_reencrypt,
+          slot_size: slot_size_for_reencrypt,
           padding: @padding
         ).call
       ensure
         Secrets.wipe_each!(dek, inner_bytes)
         Secrets.wipe_each!(inner.content, inner.metadata) if inner
+      end
+
+      private
+
+      def capacity_for_reencrypt
+        return @envelope.header.recipient_capacity if @recipient_capacity.nil?
+
+        Format.validate_capacity!(@recipient_capacity, KeyMaterial.public_keys(@recipients).length)
+      end
+
+      def slot_size_for_reencrypt
+        return @envelope.header.slot_size if @slot_size.nil?
+
+        Format.validate_slot_size!(@slot_size)
       end
     end
 
@@ -165,11 +182,11 @@ module PQCrypto
       ).call
     end
 
-    def decrypt(envelope, with:, required_padding: nil, **limit_options)
+    def decrypt(envelope, with:, required_padding: :from_header, **limit_options)
       open(envelope, with: with, required_padding: required_padding, **limit_options).data
     end
 
-    def open(envelope, with:, required_padding: nil, **limit_options)
+    def open(envelope, with:, required_padding: :from_header, **limit_options)
       OneShotOpener.new(
         envelope,
         credentials: with,
@@ -204,16 +221,15 @@ module PQCrypto
       )
     end
 
-    def drop_recipient_stanza(envelope, with:, remaining_recipients:, **limit_options)
-      rebuild_recipients(envelope, with: with, recipients: remaining_recipients, **limit_options)
-    end
-
-    def rotate_dek(envelope, with:, recipients:, padding: :preserve, **limit_options)
+    def rotate_dek(envelope, with:, recipients:, padding: :preserve,
+                   recipient_capacity: nil, slot_size: nil, **limit_options)
       DekRotator.new(
         envelope,
         credentials: with,
         recipients: recipients,
         padding: padding,
+        recipient_capacity: recipient_capacity,
+        slot_size: slot_size,
         limits: ResourceLimits.resolve(limit_options)
       ).call
     end
@@ -237,7 +253,7 @@ module PQCrypto
 
     PUBLIC_API = %i[
       credentials encrypt decrypt open inspect_envelope digest
-      rebuild_recipients add_recipient drop_recipient_stanza rotate_dek
+      rebuild_recipients add_recipient rotate_dek
     ].freeze
 
     private_class_method(*(singleton_methods(false).map(&:to_sym) - PUBLIC_API))

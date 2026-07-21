@@ -53,7 +53,8 @@ module PQCrypto
 
     class FileDekRotator
       def initialize(source, destination, credentials:, recipients:, padding:,
-                     staging_directory:, chunk_size:, limits:)
+                     staging_directory:, chunk_size:, limits:,
+                     recipient_capacity: nil, slot_size: nil)
         @source = source
         @destination = destination
         @credentials = credentials
@@ -62,6 +63,8 @@ module PQCrypto
         @staging_directory = staging_directory
         @chunk_size = IOHelpers.validate_chunk_size(chunk_size)
         @limits = limits
+        @recipient_capacity = recipient_capacity
+        @slot_size = slot_size
       end
 
       def call
@@ -88,6 +91,8 @@ module PQCrypto
       def rotate(verified)
         envelope = verified.stream_envelope
         padding = @padding == :preserve ? { to: envelope.envelope_bytes } : @padding
+        capacity = @recipient_capacity.nil? ? envelope.header.recipient_capacity : @recipient_capacity
+        slot = @slot_size.nil? ? envelope.header.slot_size : @slot_size
         AtomicDestination.new(@destination).write do |output|
           StreamingEncryptor.new(
             verified.content_io,
@@ -96,8 +101,8 @@ module PQCrypto
             to: @recipients,
             metadata: verified.inner.metadata,
             public_metadata: envelope.header.public_metadata,
-            recipient_capacity: envelope.header.recipient_capacity,
-            slot_size: envelope.header.slot_size,
+            recipient_capacity: capacity,
+            slot_size: slot,
             padding: padding,
             chunk_size: @chunk_size,
             strict_size: false

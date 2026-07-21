@@ -64,8 +64,18 @@ module ReleaseContract
 
   def check_action_pins!
     workflow = File.join(ROOT, ".github", "workflows", "ci.yml")
+    abort "CI workflow is missing" unless File.file?(workflow)
+
+    body = File.read(workflow)
+    abort "CI workflow must set permissions: contents: read" unless body.match?(/permissions:\s*\n\s*contents:\s*read/)
+
+    required_jobs = %w[test sanitize fuzz release_contract gem-smoke]
+    required_jobs.each do |job|
+      abort "CI workflow is missing job #{job}" unless body.match?(/^  #{Regexp.escape(job)}:/)
+    end
+
     File.readlines(workflow, chomp: true).grep(/^\s*uses:/).each do |line|
-      reference = line.split("@", 2).last.to_s.strip
+      reference = line.split("@", 2).last.to_s.strip.split(/\s+/, 2).first
       abort "GitHub Action is not pinned to a commit SHA: #{line.strip}" unless reference.match?(/\A[0-9a-f]{40}\z/)
     end
   end

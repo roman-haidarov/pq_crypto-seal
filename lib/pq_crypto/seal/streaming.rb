@@ -186,17 +186,20 @@ module PQCrypto
       end
 
       def call
-        staging = IOHelpers.staging_file("pqcrypto-seal-inner", @staging_directory)
+        ciphertext_staging = IOHelpers.staging_file("pqcrypto-seal-ct", @staging_directory)
         envelope = StreamEnvelope.read(@input, @limits)
         dek = envelope.unwrap_dek(@credentials)
-        decrypt_payload(staging, envelope, dek)
-        staging.flush
-        inner = StagedInner.parse(staging, envelope.header.padded_inner_length)
+        tag = stage_and_authenticate_ciphertext(ciphertext_staging, envelope, dek)
+        plaintext_staging = materialize_verified_plaintext(ciphertext_staging, envelope, dek, tag)
+        IOHelpers.close_tempfile(ciphertext_staging)
+        ciphertext_staging = nil
+        inner = StagedInner.parse(plaintext_staging, envelope.header.padded_inner_length)
         @limits.check_plaintext!(inner.content_length)
-        VerifiedStream.new(staging, envelope, inner, @chunk_size)
+        VerifiedStream.new(plaintext_staging, envelope, inner, @chunk_size)
       rescue StandardError
         Secrets.wipe!(inner.metadata) if inner
-        IOHelpers.close_tempfile(staging) if staging
+        IOHelpers.close_tempfile(plaintext_staging) if plaintext_staging
+        IOHelpers.close_tempfile(ciphertext_staging) if ciphertext_staging
         raise
       ensure
         Secrets.wipe!(dek)
@@ -204,10 +207,33 @@ module PQCrypto
 
       private
 
-      def decrypt_payload(staging, envelope, dek)
-        envelope.stream_verified_payload(@input, dek, @chunk_size, strict_eof: @strict_eof) do |_ciphertext, plaintext|
-          IOHelpers.write_all(staging, plaintext)
+      def stage_and_authenticate_ciphertext(staging, envelope, dek)
+        envelope.stream_verified_payload(@input, dek, @chunk_size, strict_eof: @strict_eof) do |ciphertext, _plaintext|
+          IOHelpers.write_all(staging, ciphertext)
         end
+      end
+
+      def materialize_verified_plaintext(ciphertext_staging, envelope, dek, tag)
+        staging = IOHelpers.staging_file("pqcrypto-seal-inner", @staging_directory)
+        decryptor = Native::Decryptor.new(dek, envelope.header.payload_nonce, envelope.header_hash)
+        ciphertext_staging.rewind
+        message = { message: "staged ciphertext is truncated" }
+        IOHelpers.each_exact_chunk(
+          ciphertext_staging, envelope.header.padded_inner_length, @chunk_size, **message
+        ) do |ciphertext|
+          plaintext = decryptor.update(ciphertext)
+          begin
+            IOHelpers.write_all(staging, plaintext)
+          ensure
+            Secrets.wipe!(plaintext)
+          end
+        end
+        decryptor.final(tag)
+        staging.flush
+        staging
+      rescue StandardError
+        IOHelpers.close_tempfile(staging) if staging
+        raise
       end
     end
 

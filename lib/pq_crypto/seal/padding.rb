@@ -114,6 +114,21 @@ module PQCrypto
         end
       end
 
+      class PolicyIdRequirement
+        def initialize(policy_id)
+          @policy_id = Integer(policy_id)
+          freeze
+        end
+
+        def verify!(context)
+          actual = context.header.padding_policy_id
+          return true if actual == @policy_id
+
+          raise FormatError,
+                "header padding_policy_id=#{actual} does not match required policy #{@policy_id}"
+        end
+      end
+
       NONE = NonePolicy.new
       PADME = PadmePolicy.new
       NO_REQUIREMENT = NoRequirement.new.freeze
@@ -127,7 +142,9 @@ module PQCrypto
 
       HEADER_POLICIES = {
         Format::PADDING_NONE => NONE,
-        Format::PADDING_PADME => PADME
+        Format::PADDING_PADME => PADME,
+        Format::PADDING_FIXED => PolicyIdRequirement.new(Format::PADDING_FIXED),
+        Format::PADDING_BUCKETS => PolicyIdRequirement.new(Format::PADDING_BUCKETS)
       }.freeze
 
       module_function
@@ -191,8 +208,7 @@ module PQCrypto
 
       def policy_from_header(policy_id)
         HEADER_POLICIES.fetch(policy_id) do
-          raise InvalidConfigurationError,
-                "required_padding: :from_header cannot verify fixed/buckets without parameters"
+          raise FormatError, "unknown padding_policy_id in header: #{policy_id}"
         end
       end
 

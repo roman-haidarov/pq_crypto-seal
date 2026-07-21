@@ -1,8 +1,12 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -16,12 +20,12 @@ jobs:
             ruby: "2.7.1"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev
       - if: runner.os == 'macOS'
         run: brew install openssl@3 || true
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@a30dfa457ad68707b8b910ac3a244714b61c0626 # v1.320.0
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
@@ -45,9 +49,9 @@ jobs:
   sanitize:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@a30dfa457ad68707b8b910ac3a244714b61c0626 # v1.320.0
         with:
           ruby-version: "3.4"
           bundler-cache: true
@@ -64,3 +68,57 @@ jobs:
           export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1:abort_on_error=1"
           export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
           bundle exec rake test
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - uses: ruby/setup-ruby@a30dfa457ad68707b8b910ac3a244714b61c0626 # v1.320.0
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - run: bundle exec rake compile
+      - name: Self-driving decrypt fuzzer
+        run: bundle exec ruby fuzz/decrypt_fuzz.rb --ci --iterations 400
+
+  release_contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ruby/setup-ruby@a30dfa457ad68707b8b910ac3a244714b61c0626 # v1.320.0
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - run: bundle exec ruby script/release_contract_check.rb
+
+  gem-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - uses: ruby/setup-ruby@a30dfa457ad68707b8b910ac3a244714b61c0626 # v1.320.0
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Build gem and run isolated E2E
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gem build pq_crypto-seal.gemspec
+          gem_path="$(ls -1 pq_crypto-seal-*.gem | sort | tail -n1)"
+          bundle exec ruby script/release_contract_check.rb "${gem_path}"
+          smoke_home="$(mktemp -d)"
+          export GEM_HOME="${smoke_home}"
+          export GEM_PATH="${smoke_home}"
+          export PATH="${smoke_home}/bin:${PATH}"
+          # Runtime dep must land first: gem install resolves requirements immediately.
+          gem install pq_crypto -v 0.6.4 --no-document
+          gem install --local "${gem_path}" --no-document
+          ruby -e '
+            require "pq_crypto/seal"
+            kp = PQCrypto::HybridKEM.generate(PQCrypto::Seal::WRAP_KEM_ALGORITHM)
+            env = PQCrypto::Seal.encrypt("smoke", to: kp.public_key, padding: :padme)
+            raise "round-trip failed" unless PQCrypto::Seal.decrypt(env, with: kp) == "smoke"
+            puts "gem-smoke: OK"
+          '

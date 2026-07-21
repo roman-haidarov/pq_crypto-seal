@@ -38,9 +38,10 @@ The payload AEGIS associated data is exactly:
 SHA-256(exact immutable payload header bytes)
 ```
 
-Content suite `1` fixes AEGIS-256, a 32-byte nonce, a 32-byte tag, and
-inner-frame-v1. The padding policy ID records how the final envelope length was
-chosen; it is authenticated as part of the header.
+Content suite `1` fixes AEGIS-256 (libaegis 0.10.3; CFRG draft-18 KATs), a
+32-byte nonce, a 32-byte tag, and inner-frame-v1. The padding policy ID records
+how the final envelope length was chosen; it is authenticated as part of the
+header.
 
 ## Mutable recipient section
 
@@ -53,9 +54,10 @@ chosen; it is authenticated as part of the header.
 Every complete recipient-section rebuild creates a new random section ID and
 recreates all real and dummy slots. Mixed wrapping suites are forbidden.
 
-Wrap suite `1` fixes MLKEM768-X25519/X-Wing-compatible encapsulation
-(`pq_crypto` algorithm `:ml_kem_768_x25519_xwing`), HKDF-SHA256, AEGIS-256 DEK
-wrapping, and 32-byte wrap nonces/tags. Exact sizes:
+Wrap suite `1` fixes MLKEM768-X25519/X-Wing **draft-10**-compatible encapsulation
+(`pq_crypto = 0.6.4` algorithm `:ml_kem_768_x25519_xwing`), HKDF-SHA256, AEGIS-256
+DEK wrapping, and 32-byte wrap nonces/tags. The suite id freezes that behaviour
+for at-rest data even if a later RFC text diverges. Exact sizes:
 
 | Value | Bytes |
 |---|---:|
@@ -121,8 +123,9 @@ The padding amount is chosen so the size of the complete final envelope reaches
 the configured Padmé/fixed/bucket target.
 
 During incremental decryption, all inner bytes are untrusted until the final tag
-has been verified. Implementations stage the complete inner frame, authenticate
-it, then parse lengths and publish content.
+has been verified. Implementations stage the complete **ciphertext** inner frame,
+authenticate the tag, materialise plaintext only after verification, then parse
+lengths and publish content.
 
 ## Defaults
 
@@ -139,10 +142,13 @@ stream consumers that intentionally embed one envelope inside a larger stream
 must use `encrypt_frame_io` / `decrypt_frame_io`.
 
 
-## Receiver-side padding checks (0.1.1+)
+## Receiver-side padding checks (0.1.2+)
 
 `padding_policy_id` is authenticated but does not by itself encode fixed targets
-or bucket lists. Decryptors that need enforcement pass `required_padding:`. The
-receiver verifies the authenticated policy id and recomputes the canonical target
-from the authenticated inner lengths. Fixed and bucket policies require the
-expected target or bucket list from the application.
+or bucket lists. Decrypt APIs default to `required_padding: :from_header`:
+
+- Padmé / none — full canonical size enforcement
+- fixed / buckets — accept authenticated policy id; full target checks need
+  `required_padding: { to: N }` or `{ buckets: [...] }`
+
+Pass `required_padding: false` to skip enforcement.

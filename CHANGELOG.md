@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- Runtime dependency relaxed from `pq_crypto = 0.6.4` to `pq_crypto ~> 0.6`
+  so patch/minor releases on the 0.6 line (including 0.6.7) resolve without a
+  Seal bump. Wire suite 1 remains pinned by algorithm id and exact
+  key/ciphertext/shared-secret sizes inside Seal; do not treat this as carte
+  blanche for a future `1.x` / breaking KEM wire change.
+
 ## 0.1.2
 
 ### Security

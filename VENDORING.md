@@ -13,7 +13,7 @@ libaegis 0.10.3.
   this snapshot, not to a future RFC that may diverge.
 
 X-Wing / MLKEM768-X25519 wrap suite 1 is supplied by runtime dependency
-`pq_crypto = 0.6.4` (not vendored here). External draft-10 decapsulation KATs
+`pq_crypto ~> 0.6` (not vendored here). External draft-10 decapsulation KATs
 live in `test/fixtures/xwing-draft-10-vector-*.json`.
 
 The complete source snapshot is retained, while the Ruby extension compiles only the AEGIS-256 and common implementation files it exposes. No system libaegis is

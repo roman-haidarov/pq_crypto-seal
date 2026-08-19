@@ -1,7 +1,7 @@
 # Security
 
 This project has not received an independent cryptographic or implementation
-audit. Do not treat version 0.1.2 as a substitute for a reviewed storage design.
+audit. Do not treat version 0.1.3 as a substitute for a reviewed storage design.
 
 Experimental cryptographic software; format v1; not independently audited.
 
@@ -128,7 +128,7 @@ independent of future RFC text:
 
 | Component | Pin |
 |---|---|
-| `wrap_suite_id = 1` | MLKEM768-X25519 / X-Wing **draft-10** compatible via `pq_crypto = 0.6.4` algorithm `:ml_kem_768_x25519_xwing` (PK 1216, CT 1120, SS 32) |
+| `wrap_suite_id = 1` | MLKEM768-X25519 / X-Wing **draft-10** compatible via `pq_crypto ~> 0.6` algorithm `:ml_kem_768_x25519_xwing` (PK 1216, CT 1120, SS 32) |
 | `content_suite_id = 1` | AEGIS-256, 32-byte nonce/tag, inner-frame-v1, via vendored **libaegis 0.10.3** |
 | AEGIS KATs | CFRG AEGIS draft-18 positive/negative vectors in `test/aegis_vectors_test.rb` |
 | X-Wing KATs | draft-10 decapsulation vectors in `test/fixtures/xwing-draft-10-vector-*.json` (see `test/xwing_kat_test.rb`) |

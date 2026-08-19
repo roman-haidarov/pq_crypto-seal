@@ -7,7 +7,7 @@ require "rubygems/requirement"
 ROOT = File.expand_path("..", __dir__)
 SPEC_PATH = File.join(ROOT, "pq_crypto-seal.gemspec")
 CHECKSUMS_PATH = File.join(ROOT, "test", "fixtures", "CHECKSUMS.sha256")
-EXPECTED_PQ_CRYPTO = Gem::Requirement.new("= 0.6.4")
+EXPECTED_PQ_CRYPTO = Gem::Requirement.new("~> 0.6")
 
 module ReleaseContract
   module_function
@@ -31,9 +31,9 @@ module ReleaseContract
 
   def check_dependency!(spec)
     dependency = spec.runtime_dependencies.find { |item| item.name == "pq_crypto" }
-    return if dependency && dependency.requirement == EXPECTED_PQ_CRYPTO
+    return if dependency && dependency.requirement.to_s == EXPECTED_PQ_CRYPTO.to_s
 
-    abort "pq_crypto dependency must be exactly #{EXPECTED_PQ_CRYPTO}"
+    abort "pq_crypto dependency must be #{EXPECTED_PQ_CRYPTO} (got #{dependency&.requirement.inspect})"
   end
 
   def check_wire_sources!

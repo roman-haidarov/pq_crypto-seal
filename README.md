@@ -12,17 +12,17 @@ random DEK → AEGIS-256 → document
 `libaegis` 0.10.3 is vendored and compiled into the extension. The existing
 `pq_crypto` gem supplies the hybrid KEM and OpenSSL-backed primitives.
 
-> **Status:** 0.1.2 is experimental cryptographic software; format v1; not
+> **Status:** 0.1.3 is experimental cryptographic software; format v1; not
 > independently audited. Read `SECURITY.md` before using it for irreplaceable data.
 >
-> `wrap_suite_id = 1` is pinned to `:ml_kem_768_x25519_xwing` and `pq_crypto = 0.6.4`
+> `wrap_suite_id = 1` is pinned to `:ml_kem_768_x25519_xwing` and `pq_crypto ~> 0.6`
 > (X-Wing draft-10 wire sizes). Content suite 1 is AEGIS-256 via libaegis 0.10.3.
 
 ## Installation
 
 ```ruby
-gem "pq_crypto", "~> 0.6.4"
-gem "pq_crypto-seal", "~> 0.1.2"
+gem "pq_crypto", "~> 0.6"
+gem "pq_crypto-seal", "~> 0.1.3"
 ```
 
 Ruby `>= 2.7.1` and OpenSSL `>= 3.0` development files are required for a

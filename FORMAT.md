@@ -55,7 +55,7 @@ Every complete recipient-section rebuild creates a new random section ID and
 recreates all real and dummy slots. Mixed wrapping suites are forbidden.
 
 Wrap suite `1` fixes MLKEM768-X25519/X-Wing **draft-10**-compatible encapsulation
-(`pq_crypto = 0.6.4` algorithm `:ml_kem_768_x25519_xwing`), HKDF-SHA256, AEGIS-256
+(`pq_crypto ~> 0.6` algorithm `:ml_kem_768_x25519_xwing`), HKDF-SHA256, AEGIS-256
 DEK wrapping, and 32-byte wrap nonces/tags. The suite id freezes that behaviour
 for at-rest data even if a later RFC text diverges. Exact sizes:
 

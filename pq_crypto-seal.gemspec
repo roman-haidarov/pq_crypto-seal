@@ -45,7 +45,7 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/pq_crypto_seal/extconf.rb"]
 
-  spec.add_runtime_dependency "pq_crypto", "= 0.6.4"
+  spec.add_runtime_dependency "pq_crypto", "~> 0.6"
   spec.add_development_dependency "minitest", "~> 5.14"
   spec.add_development_dependency "rake", "~> 13.0"
   spec.add_development_dependency "rake-compiler", "~> 1.2"

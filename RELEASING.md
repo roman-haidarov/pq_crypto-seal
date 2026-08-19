@@ -1,7 +1,7 @@
 # Releasing
 
 1. Run `bundle exec ruby script/vendor_libs.rb --check`.
-2. Confirm `pq_crypto` dependency remains `= 0.6.4` and `WRAP_KEM_ALGORITHM`
+2. Confirm `pq_crypto` dependency remains `~> 0.6` and `WRAP_KEM_ALGORITHM`
    is still `:ml_kem_768_x25519_xwing` with the documented sizes.
 3. Run `bundle exec ruby script/release_contract_check.rb` (also enforced in CI).
 4. Run the full CI matrix: test, sanitize, fuzz, release_contract, gem-smoke.

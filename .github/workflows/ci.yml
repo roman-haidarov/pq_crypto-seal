@@ -113,7 +113,7 @@ jobs:
           export GEM_PATH="${smoke_home}"
           export PATH="${smoke_home}/bin:${PATH}"
           # Runtime dep must land first: gem install resolves requirements immediately.
-          gem install pq_crypto -v 0.6.4 --no-document
+          gem install pq_crypto --version '~> 0.6' --no-document
           gem install --local "${gem_path}" --no-document
           ruby -e '
             require "pq_crypto/seal"

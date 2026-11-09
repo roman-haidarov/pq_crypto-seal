@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 #include "pqs_core.h"
-#include "vendor/libaegis/src/aegis256/aegis256_soft.h"
+#include "aegis256/aegis256_soft.h"
 
 #define THREADS     8
 #define ITERATIONS  200

@@ -53,7 +53,7 @@ for source in "${AEGIS}"/aegis256/*.c "${AEGIS}"/common/*.c; do
   vendor_objects+=("${object}")
 done
 
-"${CC}" "${COMMON[@]}" "${STRICT[@]}" "${SSL_CFLAGS[@]}" -I"${AEGIS}/include" -I"${EXT}" \
+"${CC}" "${COMMON[@]}" "${STRICT[@]}" "${SSL_CFLAGS[@]}" -I"${AEGIS}/include" -I"${EXT}" -isystem "${AEGIS}" \
   "${HERE}/core_test.c" "${EXT}/pqs_core.c" "${EXT}/aegis_unused_stubs.c" \
   "${vendor_objects[@]}" "${SSL_LIBS[@]}" -o "${workdir}/core_test"
 

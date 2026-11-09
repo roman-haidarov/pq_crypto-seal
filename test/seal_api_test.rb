@@ -38,6 +38,22 @@ class SealApiTest < Minitest::Test
     assert_raises(ArgumentError) { SEAL.inspect_envelope('', max_bogus_bytes: 1) }
   end
 
+  def test_string_keyed_resource_limit_is_enforced
+    envelope = SEAL.encrypt('x' * 100, to: ALICE.public_key)
+    assert_raises(PQCrypto::Seal::ResourceLimitError) do
+      SEAL.decrypt(envelope, with: ALICE, 'max_plaintext_bytes' => 10)
+    end
+  end
+
+  def test_conflicting_resource_limit_keys_are_rejected_in_either_order
+    envelope = SEAL.encrypt('x' * 100, to: ALICE.public_key)
+    [{ max_plaintext_bytes: 10, 'max_plaintext_bytes' => 1000 },
+     { 'max_plaintext_bytes' => 1000, max_plaintext_bytes: 10 }].each do |limits|
+      error = assert_raises(ArgumentError) { SEAL.decrypt(envelope, with: ALICE, **limits) }
+      assert_equal 'resource limit max_plaintext_bytes is given more than once', error.message
+    end
+  end
+
   def test_non_positive_resource_limit_is_rejected
     error = assert_raises(ArgumentError) { SEAL.inspect_envelope('', max_envelope_bytes: 0) }
     assert_equal 'max_envelope_bytes must be positive', error.message

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.1.5
+
+### Security
+
+- Enforce resource limit overrides with String keys, including options loaded
+  from YAML or JSON. Providing the same limit as a String and a Symbol raises
+  `ArgumentError` regardless of their order.
+- Corrected libaegis provenance for earlier releases. Versions 0.1.0–0.1.3
+  bundled libaegis 0.10.0 despite references to 0.10.3. Version 0.1.4 moved to
+  the pinned 0.10.3 archive, which includes upstream's rewrite of the
+  constant-time software AES path. Version 0.1.5 retains that snapshot.
+
+### Fixed
+
+- Linux OpenSSL discovery uses the compiler target from the effective `mkmf`
+  flags for multiarch headers and libraries. Candidates must link against
+  OpenSSL 3 before selection. Incompatible automatic candidates are skipped.
+- The `sanitize` CI job runs the standalone C tests under ASan and UBSan. The
+  C harness builds with both GCC and Clang. The Ruby step disables ASan's fake
+  stack so the hosted interpreter can find live native `VALUE`s during GC.
+- Documented the padding needed when growing the recipient section via
+  `rotate_dek` or `rotate_dek_file`. The default `:preserve` uses fixed padding
+  and retains the original envelope length.
+
+### Changed
+
+- Large AEGIS operations clear and release the native input snapshot before
+  allocating the Ruby result. Operations outside the GVL still use private
+  input and output buffers, with the associated allocation and copying cost.
+  Use the IO or File APIs for bounded-memory processing of large payloads.
+
 ## 0.1.4
 
 Wire format v1, the public API and the error classes are unchanged. The frozen
@@ -20,7 +51,8 @@ golden envelope (`test/frozen_envelope_test.rb`) is byte-identical.
   `GC.compact` raising it could crash. It is now a registered root.
 - **AEGIS operations without the GVL use private C buffers** for the inputs and
   output. The extension creates the Ruby result with the GVL after the operation,
-  then wipes and frees the C buffers.
+  then wipes and frees the C buffers. This adds copies and raises the time and
+  peak memory cost of large String operations compared with 0.1.3.
 - **Interrupts after a GVL-free section are handled.** Work runs under
   `rb_protect`; key copies and snapshots are wiped and outputs cleared before a
   pending `Thread#raise`/`kill` is re-raised. An interrupted or failed
@@ -51,8 +83,9 @@ golden envelope (`test/frozen_envelope_test.rb`) is byte-identical.
   keyword signatures.
 - `PQC_SEAL_SANITIZE` accepts a sanitizer list (`1` still means
   `address,undefined`).
-- `extconf.rb` restructured into `PQCSealBuild` modules; OpenSSL selection is
-  unchanged.
+- `extconf.rb` restructured into `PQCSealBuild` modules. The discovery order
+  stayed the same and the selected OpenSSL headers were pinned through an
+  `openssl-include` directory and `dir_config`.
 - Development dependencies moved from the gemspec to the Gemfile.
 - Internal helpers changed shape: `Format.split_slot(slot)` no longer takes the
   slot size, `Format.validate_capacity!` no longer checks the recipient count
@@ -64,7 +97,7 @@ golden envelope (`test/frozen_envelope_test.rb`) is byte-identical.
 ### Testing
 
 - Ruby regression tests cover native arguments, GC, concurrent updates and the
-  IO cases above. CI also runs the Ruby-independent C tests under ASan and UBSan.
+  IO cases above. The standalone C sanitizer harness is in `test/c_core/run.sh`.
 
 ## 0.1.3
 
@@ -100,7 +133,7 @@ golden envelope (`test/frozen_envelope_test.rb`) is byte-identical.
   overrides because they re-encrypt the authenticated plaintext under a new DEK.
 - **At-rest draft pinning documented.** SECURITY.md / FORMAT.md / VENDORING.md
   state that suite 1 and content suite 1 are pinned to X-Wing draft-10 and
-  AEGIS-256 (IETF CFRG draft-18 vectors via libaegis 0.10.3), not to future RFC
+  AEGIS-256 (IETF CFRG draft-18 vectors via vendored libaegis), not to future RFC
   text. External KATs are referenced; self-generated golden vectors pin Seal's
   own wire layout only.
 - **CI / release hygiene matched to claims.** Workflow Actions pinned by full

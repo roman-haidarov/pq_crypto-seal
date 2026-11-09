@@ -1,7 +1,7 @@
 # Security
 
 This project has not received an independent cryptographic or implementation
-audit. Do not treat version 0.1.4 as a substitute for a reviewed storage design.
+audit. Do not treat version 0.1.5 as a substitute for a reviewed storage design.
 
 Experimental cryptographic software; format v1; not independently audited.
 

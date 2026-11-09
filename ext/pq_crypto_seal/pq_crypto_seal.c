@@ -49,9 +49,15 @@ typedef struct {
 } pqs_nogvl_call;
 
 typedef struct {
+    uint8_t *snapshot;
+    size_t snapshot_len;
+    uint8_t *output;
+    size_t output_len;
+} pqs_workspace;
+
+typedef struct {
     pqs_aead_job job;
-    uint8_t *workspace;
-    size_t workspace_len;
+    pqs_workspace workspace;
 } pqs_aead_call;
 
 typedef struct {
@@ -88,20 +94,27 @@ static void wipe_string(VALUE string) {
     pqs_wipe(RSTRING_PTR(string), bytes_len(string));
 }
 
-static void wipe_and_free(uint8_t *buffer, size_t len) {
-    OPENSSL_clear_free(buffer, len);
+static void workspace_release(pqs_workspace *workspace) {
+    OPENSSL_clear_free(workspace->snapshot, workspace->snapshot_len);
+    OPENSSL_clear_free(workspace->output, workspace->output_len);
 }
 
-static uint8_t *alloc_workspace(size_t ad_len, size_t input_len, size_t *total_len) {
-    uint8_t *buffer;
+static pqs_workspace workspace_alloc(size_t ad_len, size_t input_len) {
+    pqs_workspace workspace;
 
-    if (input_len > (SIZE_MAX - ad_len) / 2)
+    if (input_len > SIZE_MAX - ad_len)
         rb_raise(rb_eArgError, "input is too large");
-    *total_len = ad_len + 2 * input_len;
-    buffer = OPENSSL_malloc(*total_len);
-    if (buffer == NULL)
+    workspace.snapshot_len = ad_len + input_len;
+    workspace.output_len = input_len;
+    workspace.snapshot = OPENSSL_malloc(workspace.snapshot_len);
+    if (workspace.snapshot == NULL)
         rb_memerror();
-    return buffer;
+    workspace.output = OPENSSL_malloc(workspace.output_len);
+    if (workspace.output == NULL) {
+        OPENSSL_free(workspace.snapshot);
+        rb_memerror();
+    }
+    return workspace;
 }
 
 static VALUE output_string(VALUE arg) {
@@ -109,10 +122,12 @@ static VALUE output_string(VALUE arg) {
     return rb_str_new((const char *)output->bytes, (long)output->len);
 }
 
-static int materialize_output(VALUE *output, const uint8_t *bytes, size_t len) {
-    pqs_output result = {bytes, len};
+static int materialize_output(VALUE *output, pqs_workspace *workspace) {
+    pqs_output result = {workspace->output, workspace->output_len};
     int state = 0;
 
+    OPENSSL_clear_free(workspace->snapshot, workspace->snapshot_len);
+    workspace->snapshot = NULL;
     *output = rb_protect(output_string, (VALUE)&result, &state);
     return state;
 }
@@ -248,12 +263,13 @@ static VALUE native_wipe(VALUE self, VALUE value) {
 
 static void aead_call_prepare(pqs_aead_call *call, VALUE ad, VALUE input, int offload) {
     if (offload)
-        call->workspace = alloc_workspace(bytes_len(ad), bytes_len(input), &call->workspace_len);
+        call->workspace = workspace_alloc(bytes_len(ad), bytes_len(input));
 }
 
 static pqs_status aead_call_attach(pqs_aead_call *call, VALUE key, VALUE nonce, VALUE ad,
                                    VALUE input) {
     pqs_aead_job *job = &call->job;
+    uint8_t *snapshot = call->workspace.snapshot;
     pqs_status status = copy_bytes(job->key, sizeof(job->key), key);
 
     if (status == PQS_OK)
@@ -262,21 +278,21 @@ static pqs_status aead_call_attach(pqs_aead_call *call, VALUE key, VALUE nonce, 
     job->input_len = bytes_len(input);
     job->ad = bytes_ptr(ad);
     job->input = bytes_ptr(input);
-    if (status != PQS_OK || call->workspace == NULL)
+    if (status != PQS_OK || snapshot == NULL)
         return status;
-    status = pqs_copy(call->workspace, job->ad_len, job->ad, job->ad_len);
+    status = pqs_copy(snapshot, job->ad_len, job->ad, job->ad_len);
     if (status == PQS_OK)
-        status = pqs_copy(call->workspace + job->ad_len, job->input_len,
+        status = pqs_copy(snapshot + job->ad_len, job->input_len,
                           job->input, job->input_len);
-    job->ad = call->workspace;
-    job->input = call->workspace + job->ad_len;
+    job->ad = snapshot;
+    job->input = snapshot + job->ad_len;
     return status;
 }
 
 static void aead_call_release(pqs_aead_call *call) {
     pqs_wipe(call->job.key, sizeof(call->job.key));
     pqs_wipe(call->job.nonce, sizeof(call->job.nonce));
-    wipe_and_free(call->workspace, call->workspace_len);
+    workspace_release(&call->workspace);
 }
 
 static void aead_call_attach_or_raise(pqs_aead_call *call, pqs_status status) {
@@ -289,14 +305,14 @@ static void aead_call_attach_or_raise(pqs_aead_call *call, pqs_status status) {
 
 static int aead_call_run(pqs_aead_call *call, void *(*fn)(void *), VALUE *output) {
     pqs_aead_job *job = &call->job;
-    int offload = call->workspace != NULL;
+    int offload = call->workspace.snapshot != NULL;
     int state;
 
-    job->output = offload ? call->workspace + job->ad_len + job->input_len : mutable_bytes_ptr(*output);
+    job->output = offload ? call->workspace.output : mutable_bytes_ptr(*output);
     job->status = PQS_ERR_CRYPTO;
     state = run_job(fn, job, offload);
     if (offload && state == 0 && job->status == PQS_OK)
-        state = materialize_output(output, job->output, job->input_len);
+        state = materialize_output(output, &call->workspace);
     if (!offload && job->status != PQS_OK)
         wipe_string(*output);
     aead_call_release(call);
@@ -420,11 +436,12 @@ static pqs_stream *stream_get(VALUE self) {
     return stream;
 }
 
-static void stream_acquire(pqs_stream *stream, uint8_t *workspace, size_t workspace_len) {
+static void stream_acquire(pqs_stream *stream, pqs_workspace *workspace) {
     pqs_status status = pqs_stream_acquire(stream);
 
     if (status != PQS_OK) {
-        wipe_and_free(workspace, workspace_len);
+        if (workspace != NULL)
+            workspace_release(workspace);
         raise_status(status, "AEGIS state lock failed", "");
     }
 }
@@ -438,7 +455,7 @@ static VALUE stream_initialize(VALUE self, VALUE key, VALUE nonce, VALUE ad, pqs
     StringValue(ad);
     require_bytes(key, PQS_KEY_BYTES, "key");
     require_bytes(nonce, PQS_NONCE_BYTES, "nonce");
-    stream_acquire(stream, NULL, 0);
+    stream_acquire(stream, NULL);
     status = pqs_stream_start(stream, mode, bytes_ptr(key), bytes_ptr(nonce), bytes_ptr(ad),
                               bytes_len(ad));
     pqs_stream_release(stream);
@@ -466,14 +483,14 @@ static VALUE stream_initialize_copy(VALUE self, VALUE source) {
     rb_raise(rb_eTypeError, "AEGIS state cannot be copied");
 }
 
-static void stream_begin_update(pqs_stream *stream, uint8_t *workspace, size_t workspace_len) {
+static void stream_begin_update(pqs_stream *stream, pqs_workspace *workspace) {
     pqs_status status;
 
-    stream_acquire(stream, workspace, workspace_len);
+    stream_acquire(stream, workspace);
     status = pqs_stream_check_update(stream);
     if (status != PQS_OK) {
         pqs_stream_release(stream);
-        wipe_and_free(workspace, workspace_len);
+        workspace_release(workspace);
         raise_status(status, "AEGIS-256 update failed", "");
     }
 }
@@ -487,8 +504,7 @@ static void stream_end_update(pqs_stream *stream, pqs_update_job *job, int state
 static VALUE stream_update(VALUE self, VALUE input) {
     pqs_stream *stream = stream_get(self);
     pqs_update_job job = {0};
-    uint8_t *workspace = NULL;
-    size_t workspace_len = 0;
+    pqs_workspace workspace = {0};
     VALUE output;
     long len;
     int offload;
@@ -499,23 +515,23 @@ static VALUE stream_update(VALUE self, VALUE input) {
     offload = offload_input(len);
     output = prepare_output(input, len, offload);
     if (offload)
-        workspace = alloc_workspace(0, (size_t)len, &workspace_len);
-    stream_begin_update(stream, workspace, workspace_len);
+        workspace = workspace_alloc(0, (size_t)len);
+    stream_begin_update(stream, &workspace);
 
     job.stream = stream;
     job.len = (size_t)len;
     job.input = bytes_ptr(input);
-    job.output = offload ? workspace + job.len : mutable_bytes_ptr(output);
+    job.output = offload ? workspace.output : mutable_bytes_ptr(output);
     job.status = PQS_ERR_CRYPTO;
     if (offload) {
-        (void)pqs_copy(workspace, job.len, job.input, job.len);
-        job.input = workspace;
+        (void)pqs_copy(workspace.snapshot, job.len, job.input, job.len);
+        job.input = workspace.snapshot;
     }
     state = run_job(pqs_stream_update, &job, offload);
     if (offload && state == 0 && job.status == PQS_OK)
-        state = materialize_output(&output, job.output, job.len);
+        state = materialize_output(&output, &workspace);
     stream_end_update(stream, &job, state);
-    wipe_and_free(workspace, workspace_len);
+    workspace_release(&workspace);
     RB_GC_GUARD(input);
     RB_GC_GUARD(self);
     if (!offload && job.status != PQS_OK)
@@ -533,7 +549,7 @@ static VALUE encryptor_final(VALUE self) {
     pqs_status status;
     VALUE result;
 
-    stream_acquire(stream, NULL, 0);
+    stream_acquire(stream, NULL);
     status = pqs_stream_encrypt_final(stream, tag);
     pqs_stream_release(stream);
     if (status != PQS_OK) {
@@ -552,7 +568,7 @@ static VALUE decryptor_final(VALUE self, VALUE tag) {
 
     StringValue(tag);
     require_bytes(tag, PQS_TAG_BYTES, "tag");
-    stream_acquire(stream, NULL, 0);
+    stream_acquire(stream, NULL);
     status = pqs_stream_decrypt_final(stream, bytes_ptr(tag));
     pqs_stream_release(stream);
     RB_GC_GUARD(self);

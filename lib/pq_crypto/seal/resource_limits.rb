@@ -11,11 +11,11 @@ module PQCrypto
         def resolve(overrides = nil)
           return overrides if overrides.is_a?(self)
 
-          new(Format::LIMIT_DEFAULTS.merge(overrides.to_h))
+          new(Format::LIMIT_DEFAULTS.merge(normalized(overrides.to_h)))
         end
 
         def checked(values)
-          unknown = values.keys.map(&:to_sym) - NAMES
+          unknown = values.keys - NAMES
           raise ArgumentError, "unknown resource limits: #{unknown.join(', ')}" unless unknown.empty?
 
           NAMES.to_h { |name| [name, positive(values, name)] }
@@ -26,6 +26,17 @@ module PQCrypto
           raise ArgumentError, "#{name} must be positive" unless value.positive?
 
           value
+        end
+
+        private
+
+        def normalized(overrides)
+          overrides.each_with_object({}) do |(key, value), names|
+            name = key.is_a?(String) ? key.to_sym : key
+            raise ArgumentError, "resource limit #{name} is given more than once" if names.key?(name)
+
+            names[name] = value
+          end
         end
       end
 

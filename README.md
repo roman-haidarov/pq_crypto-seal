@@ -12,8 +12,9 @@ random DEK → AEGIS-256 → document
 `libaegis` 0.10.3 is vendored and compiled into the extension. The existing
 `pq_crypto` gem supplies the hybrid KEM and OpenSSL-backed primitives.
 
-> **Status:** 0.1.4 is experimental cryptographic software; format v1; not
-> independently audited. Read `SECURITY.md` before using it for irreplaceable data.
+> **Status** 0.1.5 is experimental cryptographic software using format v1. It
+> has yet to undergo an independent audit. Read `SECURITY.md` before using it
+> for irreplaceable data.
 >
 > `wrap_suite_id = 1` is pinned to `:ml_kem_768_x25519_xwing` and `pq_crypto ~> 0.6`
 > (X-Wing draft-10 wire sizes). Content suite 1 is AEGIS-256 via libaegis 0.10.3.
@@ -22,7 +23,7 @@ random DEK → AEGIS-256 → document
 
 ```ruby
 gem "pq_crypto", "~> 0.6"
-gem "pq_crypto-seal", "~> 0.1.4"
+gem "pq_crypto-seal", "~> 0.1.5"
 ```
 
 Ruby `>= 2.7.1` and OpenSSL `>= 3.0` development files are required for a
@@ -130,16 +131,29 @@ rotated = PQCrypto::Seal.rotate_dek(
 ) # preserves the existing envelope size by default
 ```
 
-`rebuild_recipients` preserves the DEK and encrypted payload. It is an
-operational migration of the current canonical copy, not protection against old
-saved envelopes. `rotate_dek` creates a new DEK, a **new payload_id**, and re-encrypts the payload; it
-still cannot erase knowledge from prior copies. Rotation preserves the current
-final envelope size by default (`padding: :preserve`); pass `:padme`, `:none`, or
-an explicit padding policy to recalculate it.
+`rebuild_recipients` preserves the DEK and encrypted payload. `rotate_dek`
+creates a new DEK and a new `payload_id` and re-encrypts the payload. Anyone
+with an old envelope and its DEK can still decrypt that copy.
+
+The default `padding: :preserve` keeps the original envelope length and writes
+a fixed padding policy, including when the input used Padmé. To enforce that
+exact length on decrypt, pass `required_padding: { to: sealed.bytesize }`.
 
 `recipient_capacity` and `slot_size` are immutable for a given payload header.
-To grow either, re-encrypt via `rotate_dek` / `rotate_dek_file` with
-`recipient_capacity:` / `slot_size:` overrides.
+Pass either override to `rotate_dek` or `rotate_dek_file` to grow the recipient
+section. If the new envelope exceeds the original length, `:preserve` raises
+`InvalidConfigurationError`. Use `padding: :padme`, `:none`, or an explicit
+policy that fits the larger envelope.
+
+```ruby
+expanded = PQCrypto::Seal.rotate_dek(
+  sealed,
+  with: alice,
+  recipients: [alice.public_key, carol.public_key],
+  recipient_capacity: 8,
+  padding: :padme
+)
+```
 
 ## Wire-format v1
 

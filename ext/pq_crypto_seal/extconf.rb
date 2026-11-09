@@ -8,10 +8,13 @@ require 'shellwords'
 
 module PQCSealBuild
   module BuildHost
+    MULTIARCH_TRIPLET = /\A\w+(?:-\w+)*-linux-\w+\z/.freeze
+
     module_function
 
     def command_output(*command)
-      IO.popen(command, err: File::NULL, &:read).to_s.strip
+      output = IO.popen(command, err: File::NULL, &:read)
+      $?.success? ? output.strip : ''
     rescue StandardError
       ''
     end
@@ -22,6 +25,25 @@ module PQCSealBuild
 
     def windows?
       RbConfig::CONFIG.fetch('host_os', '').match?(/mswin|mingw|cygwin/i)
+    end
+
+    def multiarch
+      return @multiarch if defined?(@multiarch)
+
+      @multiarch = compiler_multiarch if RbConfig::CONFIG.fetch('host_os', '').include?('linux')
+    end
+
+    def compiler_multiarch
+      command = Shellwords.split(cc_command)
+      return unless command.pop(2) == ['-c', MakeMakefile::CONFTEST_C]
+
+      triplet = command_output(*command, '-print-multiarch')
+      return triplet if triplet.match?(MULTIARCH_TRIPLET)
+
+      target = command_output(*command, '-dumpmachine').sub(/\A([^-]+)-[^-]+-(linux-)/, '\\1-\\2')
+      target if target.match?(MULTIARCH_TRIPLET)
+    rescue ArgumentError
+      nil
     end
 
     def argument(name)
@@ -52,7 +74,8 @@ module PQCSealBuild
     module_function
 
     def library_dirs(prefix)
-      candidates = Dir.glob(File.join(prefix, 'lib', '*-linux-gnu'))
+      triplet = BuildHost.multiarch
+      candidates = triplet ? [File.join(prefix, 'lib', triplet)] : []
       candidates.push(File.join(prefix, 'lib64'), File.join(prefix, 'lib'))
       candidates.select { |directory| File.directory?(directory) }.uniq
     end
@@ -84,12 +107,14 @@ module PQCSealBuild
     end
 
     def from_dirs(include_directory, library_directory)
-      return unless include_directory && library_directory
+      return if include_directory.to_s.empty? || library_directory.to_s.empty?
 
       include_dir = File.expand_path(include_directory)
       library_dir = File.expand_path(library_directory)
       crypto = header_major(include_dir).to_i >= 3 && library_file(library_dir)
-      crypto && { include_directory: include_dir, library_directory: library_dir, crypto_library: crypto }
+      return unless crypto
+
+      OpenSSLFlags.try_apply(include_directory: include_dir, library_directory: library_dir, crypto_library: crypto)
     end
 
     def from_prefix(prefix)
@@ -125,7 +150,7 @@ module PQCSealBuild
       return if root.to_s.strip.empty?
 
       found = OpenSSLInstallation.from_prefix(root) || abort(<<~MSG)
-        #{root.inspect} does not point to a complete OpenSSL 3 installation.
+        #{root.inspect} does not point to a complete OpenSSL 3 installation for this compiler target.
 
         Expected OpenSSL 3 headers below <prefix>/include/openssl and libcrypto
         below <prefix>/lib, <prefix>/lib64, or a Linux multiarch lib directory.
@@ -212,25 +237,45 @@ module PQCSealBuild
       source: 'source', prefix: 'prefix', include_directory: 'include dir',
       library_directory: 'library dir', crypto_library: 'libcrypto'
     }.freeze
+    OPENSSL3_PROBE = <<~SRC
+      #include <openssl/opensslv.h>
+      #if !defined(OPENSSL_VERSION_MAJOR) || OPENSSL_VERSION_MAJOR < 3
+      #error OpenSSL 3 headers required
+      #endif
+    SRC
+    LINK_PROBE = OPENSSL3_PROBE + <<~SRC
+      #include <openssl/evp.h>
+      int main(void) {
+        EVP_MAC_free(EVP_MAC_fetch(NULL, "HMAC", NULL));
+        return 0;
+      }
+    SRC
 
     module_function
 
-    def apply(installation)
-      include_directory = installation.fetch(:include_directory)
-      pin_dir_config(include_directory, installation.fetch(:library_directory))
-      remove_competing_headers(include_directory)
-      prepend_include(shadow_include(include_directory))
-      link(installation.fetch(:library_directory), installation.fetch(:crypto_library))
-      report(installation)
+    def try_apply(installation)
+      previous = [$INCFLAGS, $CPPFLAGS, $CFLAGS, $LIBPATH, $LOCAL_LIBS, $LDFLAGS]
+      include_directory, library_directory, crypto_library =
+        installation.values_at(:include_directory, :library_directory, :crypto_library)
+      headers = header_files(include_directory)
+      return unless headers.any? { |header| File.basename(header) == 'configuration.h' }
+
+      competing = competing_paths(normalize(include_directory))
+      competing.each { |path| strip_everywhere(path) }
+      prepend_include(shadow_include(include_directory, headers))
+      link(library_directory, crypto_library)
+      compatible = checking_for("OpenSSL 3 headers and #{crypto_library}") { try_link(LINK_PROBE) }
+      return unless compatible
+
+      pin_dir_config(include_directory, library_directory)
+      competing.each { |path| puts "Ignoring competing OpenSSL headers: #{path}" }
+      installation
+    ensure
+      $INCFLAGS, $CPPFLAGS, $CFLAGS, $LIBPATH, $LOCAL_LIBS, $LDFLAGS = previous unless compatible
     end
 
     def pin_dir_config(include_directory, library_directory)
       $config_dirs['openssl'] = [include_directory, library_directory]
-    end
-
-    def remove_competing_headers(selected_directory)
-      selected = normalize(selected_directory)
-      competing_paths(selected).each { |path| strip_everywhere(path) }
     end
 
     def competing_paths(selected)
@@ -246,25 +291,27 @@ module PQCSealBuild
       $INCFLAGS = IncludeFlags.strip($INCFLAGS, path)
       $CPPFLAGS = IncludeFlags.strip($CPPFLAGS, path)
       $CFLAGS = IncludeFlags.strip($CFLAGS, path)
-      puts "Ignoring competing OpenSSL headers: #{path}"
     end
 
-    def shadow_include(selected_directory)
+    def shadow_include(selected_directory, headers)
       return selected_directory if BuildHost.windows?
 
       shadow = File.expand_path('openssl-include')
       target = File.join(shadow, 'openssl')
       FileUtils.rm_rf(target)
       FileUtils.mkdir_p(target)
-      header_files(selected_directory).each { |header| File.symlink(header, File.join(target, File.basename(header))) }
+      headers.each { |header| File.symlink(header, File.join(target, File.basename(header))) }
       shadow
     rescue SystemCallError, NotImplementedError
       selected_directory
     end
 
     def header_files(selected_directory)
-      directories = [File.join(selected_directory, 'openssl'), *Dir.glob(File.join(selected_directory, '*-*-*', 'openssl'))]
-      directories.flat_map { |directory| Dir.glob(File.join(directory, '*.h')).sort }.uniq { |header| File.basename(header) }
+      directories = [File.join(selected_directory, 'openssl')]
+      triplet = BuildHost.multiarch
+      directories << File.join(selected_directory, triplet, 'openssl') if triplet
+      directories.flat_map { |directory| Dir.glob(File.join(directory, '*.h')).sort }
+                 .select { |header| File.file?(header) }.uniq { |header| File.basename(header) }
     end
 
     def prepend_include(directory)
@@ -274,7 +321,7 @@ module PQCSealBuild
     end
 
     def link(library_directory, crypto_library)
-      $LIBPATH.unshift(library_directory) unless $LIBPATH.include?(library_directory)
+      $LIBPATH = [library_directory] | $LIBPATH
       $LOCAL_LIBS = "#{Shellwords.escape(crypto_library)} #{$LOCAL_LIBS}".strip
       return if BuildHost.windows? || library_directory.start_with?('/usr/lib')
 
@@ -315,22 +362,19 @@ module PQCSealBuild
     end
 
     def configure_openssl
+      abort 'A working C compiler and Ruby development headers are required' unless have_devel?
+
       installation = OpenSSLDiscovery.call
-      installation ? OpenSSLFlags.apply(installation) : use_default_libcrypto
+      installation ? OpenSSLFlags.report(installation) : use_default_libcrypto
       require_headers
       check_header_major(installation) if installation
       abort 'OpenSSL 3 libcrypto is required' unless have_func('EVP_MAC_fetch', 'openssl/evp.h')
     end
 
-    OPENSSL3_PROBE = <<~SRC
-      #include <openssl/opensslv.h>
-      #if !defined(OPENSSL_VERSION_MAJOR) || OPENSSL_VERSION_MAJOR < 3
-      #error OpenSSL 3 headers required
-      #endif
-    SRC
-
     def require_headers
-      abort 'OpenSSL 3.0 or newer headers are required' unless checking_for('OpenSSL 3 headers') { try_cpp(OPENSSL3_PROBE) }
+      unless checking_for('OpenSSL 3 headers') { try_cpp(OpenSSLFlags::OPENSSL3_PROBE) }
+        abort 'OpenSSL 3.0 or newer headers are required'
+      end
 
       HEADERS.each { |header| abort "#{header} is required" unless have_header(header) }
     end

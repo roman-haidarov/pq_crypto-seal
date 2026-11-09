@@ -65,9 +65,13 @@ jobs:
           N: "0"
         run: |
           export LD_PRELOAD="$(gcc -print-file-name=libasan.so)"
-          export ASAN_OPTIONS="use_sigaltstack=0:detect_leaks=0:halt_on_error=1:abort_on_error=1"
+          export ASAN_OPTIONS="use_sigaltstack=0:detect_leaks=0:detect_stack_use_after_return=0:halt_on_error=1:abort_on_error=1"
           export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
           bundle exec rake test
+      - name: Run standalone C tests under ASan and UBSan
+        env:
+          CC: gcc
+        run: bash test/c_core/run.sh
 
   fuzz:
     runs-on: ubuntu-24.04

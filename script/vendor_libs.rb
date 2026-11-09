@@ -12,7 +12,7 @@ VENDOR = File.join(ROOT, "ext/pq_crypto_seal/vendor/libaegis")
 VERSION = "0.10.3"
 URL = "https://github.com/aegis-aead/libaegis/archive/refs/tags/#{VERSION}.tar.gz"
 ARCHIVE_SHA256 = "2f2682c1d08d9a5510caca1c82e3f8ea91f7085fef2ecbed0c398b2a921c79b1"
-TREE_SHA256_FILE = File.join(VENDOR, "TREE_SHA256")
+TREE_SHA256 = "fddf2ab4de0c6ff783face9f957c395a5b1a27e96630ec0e795d50d5c03ec28e"
 
 def download(uri, limit = 5)
   abort "too many redirects while downloading libaegis" if limit <= 0
@@ -43,10 +43,13 @@ def tree_sha256(directory)
   digest.hexdigest
 end
 
-def verify!
-  expected = File.read(TREE_SHA256_FILE).strip
-  actual = tree_sha256(VENDOR)
-  abort "libaegis vendor tree mismatch\nexpected: #{expected}\nactual:   #{actual}" unless actual == expected
+def verify!(directory = VENDOR)
+  checksum_file = File.join(directory, "TREE_SHA256")
+  abort "missing vendored libaegis checksum: #{checksum_file}" unless File.file?(checksum_file)
+  abort "vendored libaegis checksum file does not match the pinned source tree" unless File.read(checksum_file).strip == TREE_SHA256
+
+  actual = tree_sha256(directory)
+  abort "libaegis vendor tree mismatch\nexpected: #{TREE_SHA256}\nactual:   #{actual}" unless actual == TREE_SHA256
   puts "libaegis #{VERSION} vendor tree verified: #{actual}"
 end
 
@@ -60,11 +63,15 @@ def update!
     abort "tar extraction failed" unless system("tar", "-xzf", archive, "-C", tmp)
     extracted = Dir[File.join(tmp, "libaegis-*")].find { |path| File.directory?(path) }
     abort "extracted libaegis directory not found" unless extracted
+    snapshot = File.join(tmp, "snapshot")
+    FileUtils.mkdir_p(snapshot)
+    FileUtils.cp_r(File.join(extracted, "src"), snapshot)
+    FileUtils.cp(File.join(extracted, "LICENSE"), snapshot)
+    File.write(File.join(snapshot, "TREE_SHA256"), TREE_SHA256 + "\n")
+    verify!(snapshot)
     FileUtils.rm_rf(VENDOR)
-    FileUtils.mkdir_p(VENDOR)
-    FileUtils.cp_r(File.join(extracted, "src"), VENDOR)
-    FileUtils.cp(File.join(extracted, "LICENSE"), VENDOR)
-    File.write(TREE_SHA256_FILE, tree_sha256(VENDOR) + "\n")
+    FileUtils.mkdir_p(File.dirname(VENDOR))
+    FileUtils.mv(snapshot, VENDOR)
   end
   verify!
 end

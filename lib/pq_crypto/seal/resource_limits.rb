@@ -7,47 +7,56 @@ module PQCrypto
 
       attr_reader(*NAMES)
 
-      def self.resolve(overrides = nil)
-        return overrides if overrides.is_a?(self)
+      class << self
+        def resolve(overrides = nil)
+          return overrides if overrides.is_a?(self)
 
-        new(Format::LIMIT_DEFAULTS.merge(overrides || {}))
-      end
+          new(Format::LIMIT_DEFAULTS.merge(overrides.to_h))
+        end
 
-      def initialize(values)
-        unknown = values.keys.map(&:to_sym) - NAMES
-        raise ArgumentError, "unknown resource limits: #{unknown.join(', ')}" unless unknown.empty?
+        def checked(values)
+          unknown = values.keys.map(&:to_sym) - NAMES
+          raise ArgumentError, "unknown resource limits: #{unknown.join(', ')}" unless unknown.empty?
 
-        NAMES.each do |name|
+          NAMES.to_h { |name| [name, positive(values, name)] }
+        end
+
+        def positive(values, name)
           value = Integer(values.fetch(name))
           raise ArgumentError, "#{name} must be positive" unless value.positive?
 
-          instance_variable_set("@#{name}", value)
+          value
         end
+      end
+
+      def initialize(values)
+        @max_staging_bytes, @max_plaintext_bytes, @max_envelope_bytes = ResourceLimits.checked(values).values_at(*NAMES)
         freeze
       end
 
-      def check_envelope!(bytes)
-        enforce!(:envelope, bytes, max_envelope_bytes)
+      def check_envelope(bytes)
+        enforce(:max_envelope_bytes, :envelope, bytes)
       end
 
-      def check_staging!(bytes)
-        enforce!(:padded_inner_length, bytes, max_staging_bytes)
+      def check_staging(bytes)
+        enforce(:max_staging_bytes, :padded_inner_length, bytes)
       end
 
-      def check_plaintext!(bytes)
-        enforce!(:plaintext, bytes, max_plaintext_bytes)
+      def check_plaintext(bytes)
+        enforce(:max_plaintext_bytes, :plaintext, bytes)
       end
 
-      def check_declared!(header, envelope_bytes: nil)
-        check_staging!(header.padded_inner_length)
-        check_envelope!(envelope_bytes) if envelope_bytes
+      def check_declared(header, envelope_bytes)
+        check_staging(header.padded_inner_length)
+        check_envelope(envelope_bytes)
         self
       end
 
       private
 
-      def enforce!(label, actual, maximum)
-        return if Integer(actual) <= maximum
+      def enforce(limit_name, label, actual)
+        maximum = public_send(limit_name)
+        return actual if Integer(actual) <= maximum
 
         raise ResourceLimitError, "#{label} #{actual} exceeds limit #{maximum}"
       end

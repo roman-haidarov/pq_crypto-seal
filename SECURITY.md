@@ -1,7 +1,7 @@
 # Security
 
 This project has not received an independent cryptographic or implementation
-audit. Do not treat version 0.1.3 as a substitute for a reviewed storage design.
+audit. Do not treat version 0.1.4 as a substitute for a reviewed storage design.
 
 Experimental cryptographic software; format v1; not independently audited.
 
@@ -67,6 +67,13 @@ Caller-owned plaintext and metadata buffers are not wiped by the encrypt path;
 callers that need residual-data hygiene must clear their own buffers.
 `Opened#data` / `Opened#metadata` returned from `open` are the caller's
 responsibility after use.
+
+Buffers the library owns (DEK, KEK, X-Wing shared secrets, the decrypted inner
+frame, the private-metadata copy, staged plaintext chunks) are zeroized in place
+by the C extension. Parsed fields are copied out instead of sliced, so no hidden
+copy-on-write root keeps decrypted bytes alive. Zeroization is still best effort:
+Ruby may have copied a string before it reached the library, and the garbage
+collector does not clear freed memory.
 
 
 ## payload_id stability

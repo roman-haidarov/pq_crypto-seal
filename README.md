@@ -12,7 +12,7 @@ random DEK → AEGIS-256 → document
 `libaegis` 0.10.3 is vendored and compiled into the extension. The existing
 `pq_crypto` gem supplies the hybrid KEM and OpenSSL-backed primitives.
 
-> **Status:** 0.1.3 is experimental cryptographic software; format v1; not
+> **Status:** 0.1.4 is experimental cryptographic software; format v1; not
 > independently audited. Read `SECURITY.md` before using it for irreplaceable data.
 >
 > `wrap_suite_id = 1` is pinned to `:ml_kem_768_x25519_xwing` and `pq_crypto ~> 0.6`
@@ -22,7 +22,7 @@ random DEK → AEGIS-256 → document
 
 ```ruby
 gem "pq_crypto", "~> 0.6"
-gem "pq_crypto-seal", "~> 0.1.3"
+gem "pq_crypto-seal", "~> 0.1.4"
 ```
 
 Ruby `>= 2.7.1` and OpenSSL `>= 3.0` development files are required for a
@@ -217,10 +217,11 @@ bundle install
 bundle exec rake
 ```
 
-Set `PQC_SEAL_SANITIZE=1` when compiling under ASan/UBSan. The suite covers
+Set `PQC_SEAL_SANITIZE=1` (address + undefined) or an explicit sanitizer list
+such as `PQC_SEAL_SANITIZE=thread` when compiling the extension. The suite covers
 AEGIS one-shot/incremental equivalence, tampering, multi-recipient opening,
-full-envelope padding, recipient rebuilds, staged file publication, and parser
-limits.
+full-envelope padding, recipient rebuilds, staged file publication, parser
+limits, concurrent use of one AEGIS state, and argument conversion edge cases.
 
 
 ## Padding enforcement on decrypt

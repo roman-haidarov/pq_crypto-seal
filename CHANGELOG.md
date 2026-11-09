@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.1.4
+
+Wire format v1, the public API and the error classes are unchanged. The frozen
+golden envelope (`test/frozen_envelope_test.rb`) is byte-identical.
+
+### Security
+
+- **Native arguments converted before use.** `require_length` converted a
+  `#to_str` argument into a local copy only, so the caller then read
+  `RSTRING_PTR` of the original, non-String object (segfault under ASan/UBSan).
+  All arguments are now converted with `StringValue` first, then validated.
+- **No length check before a later `#to_str` callback.** The key length was
+  validated before the nonce was converted; a nonce `#to_str` could shrink the
+  key and the following 32-byte copy read out of bounds. Validation now happens
+  only after every conversion.
+- **Authentication error class pinned for GC compaction.** The cached
+  `AuthenticationError` VALUE was not registered with the GC; after
+  `GC.compact` raising it could crash. It is now a registered root.
+- **AEGIS operations without the GVL use private C buffers** for the inputs and
+  output. The extension creates the Ruby result with the GVL after the operation,
+  then wipes and frees the C buffers.
+- **Interrupts after a GVL-free section are handled.** Work runs under
+  `rb_protect`; key copies and snapshots are wiped and outputs cleared before a
+  pending `Thread#raise`/`kill` is re-raised. An interrupted or failed
+  incremental update finalizes the AEGIS state, so it can no longer emit or
+  accept a tag over data the caller never received.
+- **AEGIS state locking uses `atomic_bool`** with acquire/release ordering, as in
+  `pq_crypto` 0.6.8. `Encryptor`/`Decryptor` cannot be `dup`ed or `clone`d.
+- **Effective zeroization.** `Secrets.wipe!` used `String#replace`, which frees
+  the old buffer without clearing it. Wiping now goes through `Native.wipe`
+  (in-place `OPENSSL_cleanse` after `rb_str_modify`). Parsers copy fields with
+  `unpack1` instead of `byteslice`, so decrypted plaintext is not kept alive in
+  hidden copy-on-write roots, and the private-metadata copy owns its buffer.
+- File recipient rebuilds keep rejecting trailing bytes after the envelope.
+- Stream encryption keeps caller-owned input buffers intact. Stream decryption
+  uses the normalized chunk size after authentication.
+- Extension built with `-fstack-protector-strong` and, when the toolchain does
+  not already define it, `-D_FORTIFY_SOURCE=2`.
+
+### Changed
+
+- C extension split into `pqs_core.{c,h}` and Ruby bindings. HKDF-SHA256 uses
+  OpenSSL 3 `EVP_MAC`.
+- Vendored sources and their checksum match the pinned upstream
+  `libaegis` 0.10.3 archive.
+- Ruby library refactored into small objects (header/section/inner codecs with a
+  declarative header layout, encryption plans, stanza sealing/opening, streaming
+  writers and readers). The public String and IO APIs retain their Ruby
+  keyword signatures.
+- `PQC_SEAL_SANITIZE` accepts a sanitizer list (`1` still means
+  `address,undefined`).
+- `extconf.rb` restructured into `PQCSealBuild` modules; OpenSSL selection is
+  unchanged.
+- Development dependencies moved from the gemspec to the Gemfile.
+- Internal helpers changed shape: `Format.split_slot(slot)` no longer takes the
+  slot size, `Format.validate_capacity!` no longer checks the recipient count
+  (`Format.validate_recipient_count!` does), `Format.parse_verified_inner` and
+  the `Binary.read_*` helpers were removed, and implementation classes that were
+  accidentally public (`OneShotEncryptor`, `OneShotOpener`, `RecipientRebuilder`,
+  `DekRotator`) are now private constants. `IOAPI::DEFAULT_CHUNK_SIZE` remains.
+
+### Testing
+
+- Ruby regression tests cover native arguments, GC, concurrent updates and the
+  IO cases above. CI also runs the Ruby-independent C tests under ASan and UBSan.
+
 ## 0.1.3
 
 - Runtime dependency relaxed from `pq_crypto = 0.6.4` to `pq_crypto ~> 0.6`

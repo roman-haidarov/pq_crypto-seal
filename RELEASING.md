@@ -22,15 +22,14 @@ gem; that would break the provenance guarantee. Never update the snapshot
 without rerunning official KATs, cross-backend equivalence checks, envelope
 golden vectors, and fuzz tests.
 
-The golden vectors fix every value this gem controls (recipient keys, DEK,
-nonces, section id, padding bytes, metadata, plaintext) and assert the derived
-header bytes, associated data, and one-shot/incremental equivalence. A fully
-frozen "plaintext to exact bytes" vector is intentionally not asserted for the
-KEM ciphertext region, because X-Wing encapsulation randomness originates inside
-`pq_crypto` and is not injectable here; the wire-contract check pins its exact
-sizes and round-trip instead.
+The frozen envelope test supplies a published X-Wing encapsulation result and
+deterministic randomness for Seal. It checks the digest of the complete envelope
+for both one-shot and streaming encryption. Other golden tests cover header
+bytes, associated data and recipient behaviour.
 
 The ASan job sets `detect_leaks=0` because ASan is preloaded into an otherwise
 unsanitized Ruby interpreter; host-process allocator noise would otherwise fail
-the job. Memory-safety errors still abort via `halt_on_error`.
+the job. Memory-safety errors still abort via `halt_on_error`. It also sets
+`use_sigaltstack=0`: Ruby installs its own per-thread alternate signal stack and
+ASan would otherwise try to unmap that buffer when a thread exits.
 

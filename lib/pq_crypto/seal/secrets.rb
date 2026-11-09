@@ -6,11 +6,7 @@ module PQCrypto
       module_function
 
       def wipe!(value)
-        return unless value.is_a?(String) && !value.frozen?
-
-        value.replace("\0".b * value.bytesize)
-      rescue StandardError
-        nil
+        Native.wipe(value)
       end
 
       def wipe_each!(*values)

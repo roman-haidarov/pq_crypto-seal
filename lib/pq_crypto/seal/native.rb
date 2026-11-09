@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "pq_crypto/seal/pq_crypto_seal"
+require 'pq_crypto/seal/pq_crypto_seal'
 
 module PQCrypto
   module Seal

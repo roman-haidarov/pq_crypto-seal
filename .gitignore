@@ -8,6 +8,7 @@
 *.bundle
 /ext/**/Makefile
 /ext/**/mkmf.log
+/ext/**/openssl-include/
 /Gemfile.lock
 .DS_Store
 **/.DS_Store

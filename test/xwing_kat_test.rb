@@ -1,42 +1,30 @@
 # frozen_string_literal: true
 
-require "json"
-require_relative "test_helper"
+require_relative 'test_helper'
 
 class XWingKatTest < Minitest::Test
-  ALGORITHM = :ml_kem_768_x25519_xwing
+  include SealTestSupport
 
-  def test_draft_10_decapsulation_vectors
-    [1, 2].each do |number|
-      vector = load_vector(number)
-      keypair = keypair_from(vector)
-      ciphertext = decode(vector.fetch("ct"))
-      expected = decode(vector.fetch("ss"))
+  def test_first_vector_decapsulates_to_the_published_secret
+    assert_decapsulates fixture('xwing-draft-10-vector-1.json')
+  end
 
-      assert_equal 1216, keypair.public_key.to_bytes.bytesize
-      assert_equal 32, keypair.secret_key.to_bytes.bytesize
-      assert_equal 1120, ciphertext.bytesize
-      assert_equal 32, expected.bytesize
-      assert_equal expected, keypair.secret_key.decapsulate(ciphertext)
-    ensure
-      keypair.secret_key.wipe! if keypair
-    end
+  def test_second_vector_decapsulates_to_the_published_secret
+    assert_decapsulates fixture('xwing-draft-10-vector-2.json')
+  end
+
+  def test_vector_sizes_match_wrap_suite_one
+    vector = fixture('xwing-draft-10-vector-1.json')
+    sizes = %w[pk sk ct ss].map { |name| hex(vector.fetch(name)).bytesize }
+    assert_equal [FORMAT::XWING_PUBLIC_KEY_BYTES, 32, FORMAT::XWING_CIPHERTEXT_BYTES, 32], sizes
   end
 
   private
 
-  def load_vector(number)
-    path = File.expand_path("fixtures/xwing-draft-10-vector-#{number}.json", __dir__)
-    JSON.parse(File.read(path))
-  end
-
-  def keypair_from(vector)
-    public_key = PQCrypto::HybridKEM.public_key_from_bytes(ALGORITHM, decode(vector.fetch("pk")))
-    secret_key = PQCrypto::HybridKEM.secret_key_from_bytes(ALGORITHM, decode(vector.fetch("sk")))
-    PQCrypto::HybridKEM::Keypair.new(public_key, secret_key)
-  end
-
-  def decode(hex)
-    [hex].pack("H*")
+  def assert_decapsulates(vector)
+    secret_key = PQCrypto::HybridKEM.secret_key_from_bytes(ALGORITHM, hex(vector.fetch('sk')))
+    assert_equal hex(vector.fetch('ss')), secret_key.decapsulate(hex(vector.fetch('ct')))
+  ensure
+    secret_key&.wipe!
   end
 end

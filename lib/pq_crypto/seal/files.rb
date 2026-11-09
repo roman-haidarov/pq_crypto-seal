@@ -2,142 +2,112 @@
 
 module PQCrypto
   module Seal
+    FilePaths = Struct.new(:source, :destination) do
+      def read_source(&block)
+        File.open(source, 'rb', &block)
+        destination
+      end
+
+      def write_destination(&block)
+        AtomicDestination.new(destination).write(&block)
+      end
+    end
+
     class FileRecipientRebuilder
-      def initialize(source, destination, credentials:, recipients:, chunk_size:, limits:)
-        @source = source
-        @destination = destination
-        @credentials = credentials
-        @recipients = KeyMaterial.public_keys(recipients)
-        @chunk_size = IOHelpers.validate_chunk_size(chunk_size)
-        @limits = limits
+      def initialize(paths, options)
+        @paths = paths
+        @options = options
+        @recipients = KeyMaterial.public_keys(options.fetch(:recipients))
+        @chunk_size = IOHelpers.validate_chunk_size(options.fetch(:chunk_size))
       end
 
       def call
-        File.open(@source, "rb") do |input|
-          envelope = StreamEnvelope.read(input, @limits)
-          Format.validate_capacity!(envelope.header.recipient_capacity, @recipients.length)
-          dek = envelope.unwrap_dek(@credentials)
-          new_section = build_section(envelope, dek)
-          AtomicDestination.new(@destination).write do |output|
-            rewrite_verified(input, output, envelope, new_section, dek)
-          end
-        ensure
-          Secrets.wipe!(dek)
-        end
-
-        @destination
+        paths.read_source { |input| rebuild(input) }
       end
 
       private
 
-      def build_section(envelope, dek)
-        RecipientSectionBuilder.new(
-          recipients: @recipients,
-          capacity: envelope.header.recipient_capacity,
-          slot_size: envelope.header.slot_size,
-          payload_id: envelope.header.payload_id,
-          header_hash: envelope.header_hash,
-          dek: dek
-        ).call
+      attr_reader :paths, :options, :recipients, :chunk_size
+
+      def rebuild(input)
+        envelope = read_envelope(input)
+        dek = envelope.unwrap_dek(options.fetch(:with))
+        publish(input, envelope, dek)
+      ensure
+        Secrets.wipe!(dek)
       end
 
-      def rewrite_verified(input, output, envelope, new_section, dek)
-        IOHelpers.write_all(output, envelope.header.raw)
-        IOHelpers.write_all(output, new_section)
-        tag = envelope.stream_verified_payload(input, dek, @chunk_size) do |ciphertext, _plaintext|
-          IOHelpers.write_all(output, ciphertext)
-        end
-        IOHelpers.write_all(output, tag)
+      def read_envelope(input)
+        envelope = StreamEnvelope.read(input, options.fetch(:limits))
+        Format.validate_recipient_count!(envelope.header.recipient_capacity, recipients.length)
+        envelope
+      end
+
+      def publish(input, envelope, dek)
+        section = RecipientSectionBuilder.new(envelope.section_spec, recipients, dek).call
+        pass = AuthenticatedPass.new(envelope, dek, chunk_size)
+        paths.write_destination { |output| pass.rewrite(input, output, section) }
       end
     end
 
     class FileDekRotator
-      def initialize(source, destination, credentials:, recipients:, padding:,
-                     staging_directory:, chunk_size:, limits:,
-                     recipient_capacity: nil, slot_size: nil)
-        @source = source
-        @destination = destination
-        @credentials = credentials
-        @recipients = recipients
-        @padding = padding
-        @staging_directory = staging_directory
-        @chunk_size = IOHelpers.validate_chunk_size(chunk_size)
-        @limits = limits
-        @recipient_capacity = recipient_capacity
-        @slot_size = slot_size
+      def initialize(paths, options)
+        @paths = paths
+        @options = options.merge(strict_eof: true)
       end
 
       def call
-        File.open(@source, "rb") do |input|
-          verified = AuthenticatedStaging.new(
-            input,
-            credentials: @credentials,
-            staging_directory: @staging_directory,
-            chunk_size: @chunk_size,
-            strict_eof: true,
-            limits: @limits
-          ).call
-          rotate(verified)
-        ensure
-          Secrets.wipe!(verified.inner.metadata) if verified
-          verified.close! if verified
-        end
-
-        @destination
+        paths.read_source { |input| rotate_from(input) }
       end
 
       private
 
-      def rotate(verified)
-        envelope = verified.stream_envelope
-        padding = @padding == :preserve ? { to: envelope.envelope_bytes } : @padding
-        capacity = @recipient_capacity.nil? ? envelope.header.recipient_capacity : @recipient_capacity
-        slot = @slot_size.nil? ? envelope.header.slot_size : @slot_size
-        AtomicDestination.new(@destination).write do |output|
-          StreamingEncryptor.new(
-            verified.content_io,
-            output,
-            size: verified.inner.content_length,
-            to: @recipients,
-            metadata: verified.inner.metadata,
-            public_metadata: envelope.header.public_metadata,
-            recipient_capacity: capacity,
-            slot_size: slot,
-            padding: padding,
-            chunk_size: @chunk_size,
-            strict_size: false
-          ).call
-        end
+      attr_reader :paths, :options
+
+      def rotate_from(input)
+        verified = AuthenticatedStaging.new(input, options).call
+        paths.write_destination { |output| verified.reencrypt_to(output, options) }
+      ensure
+        verified&.discard
       end
     end
 
-    module FileOperations
+    class FileOperation
+      def initialize(paths, options)
+        @paths = paths
+        @options = options
+      end
+
+      def encrypt
+        paths.read_source { |input| encrypt_stream(input) }
+      end
+
+      def decrypt
+        paths.read_source { |input| decrypt_stream(input) }
+      end
+
+      private
+
+      attr_reader :paths, :options
+
+      def encrypt_stream(input)
+        stream_options = options.merge(size: input.stat.size, strict_size: true)
+        paths.write_destination { |output| StreamingEncryptor.new(input, output, stream_options).call }
+      end
+
+      def decrypt_stream(input)
+        stream_options = options.merge(strict_eof: true)
+        paths.write_destination { |output| StreamingDecryptor.new(input, output, stream_options).call }
+      end
+    end
+
+    module FileInspection
       module_function
 
-      def encrypt(source, destination, **options)
-        File.open(source, "rb") do |input|
-          AtomicDestination.new(destination).write do |output|
-            StreamingEncryptor.new(input, output, size: input.stat.size, strict_size: true, **options).call
-          end
-        end
-
-        destination
-      end
-
-      def decrypt(source, destination, credentials:, **options)
-        File.open(source, "rb") do |input|
-          AtomicDestination.new(destination).write do |output|
-            StreamingDecryptor.new(input, output, credentials: credentials, strict_eof: true, **options).call
-          end
-        end
-
-        destination
-      end
-
-      def inspect(source, limits:)
-        File.open(source, "rb") do |input|
+      def call(source, limits)
+        File.open(source, 'rb') do |input|
           envelope = StreamEnvelope.read(input, limits)
-          raise FormatError, "file length does not match envelope" unless input.stat.size == envelope.envelope_bytes
+          raise FormatError, 'file length does not match envelope' unless input.stat.size == envelope.envelope_bytes
 
           envelope.inspection
         end

@@ -4,17 +4,17 @@ module PQCrypto
   module Seal
     module Binary
       INTEGER_TYPES = {
-        u8: [1, "C", 0xff],
-        u16: [2, "n", 0xffff],
-        u32: [4, "N", 0xffff_ffff],
-        u64: [8, "Q>", 0xffff_ffff_ffff_ffff]
+        u8: [1, 'C', 0xff],
+        u16: [2, 'n', 0xffff],
+        u32: [4, 'N', 0xffff_ffff],
+        u64: [8, 'Q>', 0xffff_ffff_ffff_ffff]
       }.freeze
 
       class Reader
         attr_reader :offset
 
         def initialize(bytes, offset = 0)
-          @bytes = String(bytes).b
+          @bytes = String(bytes)
           @offset = Integer(offset)
         end
 
@@ -23,47 +23,43 @@ module PQCrypto
         end
 
         def bytes(length)
-          length = Integer(length)
-          Binary.ensure_available!(@bytes, offset, length)
-          value = @bytes.byteslice(offset, length).b
-          @offset += length
+          count = Integer(length)
+          Binary.check_available(@bytes, offset, count)
+          value = @bytes.unpack1("@#{offset}a#{count}")
+          @offset += count
           value
         end
 
+        def remaining
+          @bytes.bytesize - offset
+        end
+
         def finished?
-          offset == @bytes.bytesize
+          remaining.zero?
         end
       end
 
       class << self
         INTEGER_TYPES.each do |name, (_length, directive, max)|
-          define_method(name) { |value| [integer!(value, max)].pack(directive) }
-          define_method("read_#{name}") { |bytes, offset| read_with(bytes, offset, &name) }
+          define_method(name) { |value| [integer(value, max)].pack(directive) }
         end
 
-        def read_bytes(bytes, offset, length)
-          read_with(bytes, offset) { |reader| reader.bytes(length) }
+        def check_available(bytes, offset, length)
+          raise FormatError, 'invalid offset' if offset.negative? || length.negative?
+
+          available = bytes.bytesize - offset
+          raise FormatError, 'truncated envelope' if available.negative? || length > available
         end
 
-        def ensure_available!(bytes, offset, length)
-          offset, length = Integer(offset), Integer(length)
-
-          raise FormatError, "invalid offset" if offset.negative? || length.negative?
-          raise FormatError, "truncated envelope" if offset > bytes.bytesize || length > bytes.bytesize - offset
+        def view(string)
+          string.encoding == Encoding::BINARY ? string : string.b
         end
 
-        def integer!(value, max)
+        def integer(value, max)
           number = Integer(value)
-          raise RangeError, "integer is out of range" if number.negative? || number > max
+          raise RangeError, 'integer is out of range' unless number.between?(0, max)
 
           number
-        end
-
-        private
-
-        def read_with(bytes, offset)
-          reader = Reader.new(bytes, offset)
-          [yield(reader), reader.offset]
         end
       end
     end

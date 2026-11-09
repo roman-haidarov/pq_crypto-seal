@@ -1,296 +1,410 @@
 # frozen_string_literal: true
 
-require "mkmf"
-require "pathname"
-require "rbconfig"
-require "shellwords"
+require 'fileutils'
+require 'mkmf'
+require 'pathname'
+require 'rbconfig'
+require 'shellwords'
 
-extension_name = "pq_crypto/seal/pq_crypto_seal"
+module PQCSealBuild
+  module BuildHost
+    module_function
 
-# Ruby 2.7 installations on macOS are often built against Homebrew OpenSSL 1.1.
-# Their RbConfig can inject that old prefix into every extension build, even when
-# OpenSSL 3 is installed separately. Select one complete OpenSSL 3 installation,
-# remove competing OpenSSL header paths, and link the selected libcrypto by its
-# absolute path so headers and library cannot silently come from different roots.
-
-def command_output(*command)
-  IO.popen(command, err: File::NULL, &:read).to_s.strip
-rescue StandardError
-  ""
-end
-
-def host_os
-  RbConfig::CONFIG.fetch("host_os", "")
-end
-
-def windows_host?
-  host_os =~ /mswin|mingw|cygwin/i
-end
-
-def openssl_library_dirs(prefix)
-  dirs = Dir.glob(File.join(prefix, "lib", "*-linux-gnu"))
-  dirs.concat([File.join(prefix, "lib64"), File.join(prefix, "lib")])
-  dirs.select { |directory| File.directory?(directory) }.uniq
-end
-
-def openssl_library_file(directory)
-  candidates = [
-    File.join(directory, "libcrypto.so.3"),
-    *Dir.glob(File.join(directory, "libcrypto.so.3.*")).sort,
-    File.join(directory, "libcrypto.so"),
-    File.join(directory, "libcrypto.3.dylib"),
-    *Dir.glob(File.join(directory, "libcrypto.3.*.dylib")).sort,
-    File.join(directory, "libcrypto.dylib"),
-    File.join(directory, "libcrypto.a"),
-    File.join(directory, "libcrypto.dll.a"),
-    File.join(directory, "crypto.lib")
-  ]
-
-  path = candidates.find { |candidate| File.file?(candidate) }
-  path && File.realpath(path)
-rescue Errno::ENOENT
-  nil
-end
-
-def openssl_header_major(include_directory)
-  header = File.join(include_directory, "openssl", "opensslv.h")
-  return nil unless File.file?(header)
-
-  contents = File.read(header)
-  major = contents[/^\s*#\s*define\s+OPENSSL_VERSION_MAJOR\s+(\d+)/, 1]
-  return major.to_i if major
-
-  # OpenSSL 1.x has no OPENSSL_VERSION_MAJOR. Parse the high hexadecimal nibble
-  # only to reject it cleanly; OpenSSL 3 installations always define the major.
-  number = contents[/^\s*#\s*define\s+OPENSSL_VERSION_NUMBER\s+0x([0-9A-Fa-f]+)L?/, 1]
-  number ? (number.to_i(16) >> 28) & 0xF : nil
-rescue StandardError
-  nil
-end
-
-def openssl_installation(include_directory, library_directory)
-  return nil unless include_directory && library_directory
-
-  include_directory = File.expand_path(include_directory)
-  library_directory = File.expand_path(library_directory)
-  return nil unless openssl_header_major(include_directory).to_i >= 3
-
-  crypto_library = openssl_library_file(library_directory)
-  return nil unless crypto_library
-
-  {
-    include_directory: include_directory,
-    library_directory: library_directory,
-    crypto_library: crypto_library
-  }
-end
-
-def openssl_prefix_installation(prefix)
-  return nil if prefix.nil? || prefix.to_s.strip.empty?
-
-  prefix = File.expand_path(prefix.to_s.strip)
-  include_directory = File.join(prefix, "include")
-  openssl_library_dirs(prefix).each do |library_directory|
-    installation = openssl_installation(include_directory, library_directory)
-    return installation.merge(prefix: prefix) if installation
-  end
-  nil
-end
-
-def argument_value(name)
-  prefix = "--#{name}"
-  ARGV.each_with_index do |argument, index|
-    return argument.split("=", 2)[1] if argument.start_with?("#{prefix}=")
-    return ARGV[index + 1] if argument == prefix && ARGV[index + 1]
-  end
-  nil
-end
-
-def explicit_openssl_installation
-  explicit_root = argument_value("with-openssl-dir") || ENV["OPENSSL_ROOT_DIR"] || ENV["OPENSSL_DIR"]
-  if explicit_root && !explicit_root.to_s.strip.empty?
-    installation = openssl_prefix_installation(explicit_root)
-    abort <<~MSG unless installation
-      #{explicit_root.inspect} does not point to a complete OpenSSL 3 installation.
-
-      Expected OpenSSL 3 headers below <prefix>/include/openssl and libcrypto
-      below <prefix>/lib, <prefix>/lib64, or a Linux multiarch lib directory.
-    MSG
-    return installation.merge(source: "explicit prefix")
-  end
-
-  explicit_include = argument_value("with-openssl-include")
-  explicit_library = argument_value("with-openssl-lib")
-  return nil unless explicit_include || explicit_library
-
-  abort "Both --with-openssl-include and --with-openssl-lib are required together" unless explicit_include && explicit_library
-  installation = openssl_installation(explicit_include, explicit_library)
-  abort "Explicit OpenSSL include/lib paths do not contain a matching OpenSSL 3 headers + libcrypto pair" unless installation
-
-  installation.merge(source: "explicit include/lib")
-end
-
-def pkg_config_openssl_installation
-  return nil unless find_executable("pkg-config")
-
-  version = command_output("pkg-config", "--modversion", "openssl")
-  return nil if version.empty? || version.split(".").first.to_i < 3
-
-  include_directory = command_output("pkg-config", "--variable=includedir", "openssl")
-  library_directory = command_output("pkg-config", "--variable=libdir", "openssl")
-  installation = openssl_installation(include_directory, library_directory)
-  installation && installation.merge(source: "pkg-config #{version}")
-end
-
-def discover_openssl3_installation
-  explicit = explicit_openssl_installation
-  return explicit if explicit
-
-  candidates = []
-  if host_os =~ /darwin/i && find_executable("brew")
-    candidates << command_output("brew", "--prefix", "openssl@3")
-    candidates << command_output("brew", "--prefix", "openssl")
-  end
-  candidates.concat(
-    %w[
-      /opt/homebrew/opt/openssl@3
-      /usr/local/opt/openssl@3
-      /opt/homebrew/opt/openssl
-      /usr/local/opt/openssl
-    ]
-  ) if host_os =~ /darwin/i
-
-  candidates.compact.map(&:strip).reject(&:empty?).uniq.each do |prefix|
-    installation = openssl_prefix_installation(prefix)
-    return installation.merge(source: "prefix", prefix: File.expand_path(prefix)) if installation
-  end
-
-  pkg_config_openssl_installation ||
-    openssl_prefix_installation("/usr/local")&.merge(source: "system prefix", prefix: "/usr/local") ||
-    openssl_prefix_installation("/usr")&.merge(source: "system prefix", prefix: "/usr")
-end
-
-def normalize_existing_path(path)
-  File.realpath(path)
-rescue Errno::ENOENT
-  File.expand_path(path)
-end
-
-def include_paths_from_flags(flags)
-  tokens = Shellwords.split(flags.to_s)
-  paths = []
-  index = 0
-
-  while index < tokens.length
-    token = tokens[index]
-    case token
-    when "-I", "-isystem"
-      paths << tokens[index + 1] if tokens[index + 1]
-      index += 2
-      next
-    when /\A-I(.+)\z/
-      paths << Regexp.last_match(1)
-    when /\A-isystem(.+)\z/
-      paths << Regexp.last_match(1)
+    def command_output(*command)
+      IO.popen(command, err: File::NULL, &:read).to_s.strip
+    rescue StandardError
+      ''
     end
-    index += 1
+
+    def darwin?
+      RbConfig::CONFIG.fetch('host_os', '').match?(/darwin/i)
+    end
+
+    def windows?
+      RbConfig::CONFIG.fetch('host_os', '').match?(/mswin|mingw|cygwin/i)
+    end
+
+    def argument(name)
+      flag = "--#{name}"
+      inline_argument(flag) || separate_argument(flag)
+    end
+
+    def inline_argument(flag)
+      found = ARGV.find { |argument| argument.start_with?("#{flag}=") }
+      found&.split('=', 2)&.last
+    end
+
+    def separate_argument(flag)
+      position = ARGV.index(flag)
+      position && ARGV[position + 1]
+    end
   end
 
-  paths
-rescue ArgumentError
-  []
-end
+  module OpenSSLInstallation
+    LIBRARY_PATTERNS = %w[
+      libcrypto.so.3 libcrypto.so.3.* libcrypto.so
+      libcrypto.3.dylib libcrypto.3.*.dylib libcrypto.dylib
+      libcrypto.a libcrypto.dll.a crypto.lib
+    ].freeze
+    MAJOR_PATTERN = /^\s*#\s*define\s+OPENSSL_VERSION_MAJOR\s+(\d+)/.freeze
+    NUMBER_PATTERN = /^\s*#\s*define\s+OPENSSL_VERSION_NUMBER\s+0x([0-9A-Fa-f]+)L?/.freeze
 
-def strip_include_path(flags, path)
-  escaped = Regexp.escape(path)
-  flags.to_s
-       .gsub(/(?:\A|\s)-I\s*#{escaped}(?=\s|\z)/, " ")
-       .gsub(/(?:\A|\s)-isystem\s*#{escaped}(?=\s|\z)/, " ")
-       .strip
-end
+    module_function
 
-def remove_competing_openssl_headers!(selected_include_directory)
-  selected = normalize_existing_path(selected_include_directory)
-  competing = [$INCFLAGS, $CPPFLAGS, $CFLAGS]
-              .flat_map { |flags| include_paths_from_flags(flags) }
-              .uniq
-              .select do |path|
-    File.file?(File.join(path, "openssl", "opensslv.h")) && normalize_existing_path(path) != selected
+    def library_dirs(prefix)
+      candidates = Dir.glob(File.join(prefix, 'lib', '*-linux-gnu'))
+      candidates.push(File.join(prefix, 'lib64'), File.join(prefix, 'lib'))
+      candidates.select { |directory| File.directory?(directory) }.uniq
+    end
+
+    def library_file(directory)
+      path = library_candidates(directory).find { |candidate| File.file?(candidate) }
+      path && File.realpath(path)
+    rescue Errno::ENOENT
+      nil
+    end
+
+    def library_candidates(directory)
+      LIBRARY_PATTERNS.flat_map { |pattern| Dir.glob(File.join(directory, pattern)).sort }
+    end
+
+    def header_major(include_directory)
+      header = File.join(include_directory, 'openssl', 'opensslv.h')
+      File.file?(header) ? major_from(File.read(header)) : nil
+    rescue StandardError
+      nil
+    end
+
+    def major_from(contents)
+      major = contents[MAJOR_PATTERN, 1]
+      return major.to_i if major
+
+      number = contents[NUMBER_PATTERN, 1]
+      number && ((number.to_i(16) >> 28) & 0xF)
+    end
+
+    def from_dirs(include_directory, library_directory)
+      return unless include_directory && library_directory
+
+      include_dir = File.expand_path(include_directory)
+      library_dir = File.expand_path(library_directory)
+      crypto = header_major(include_dir).to_i >= 3 && library_file(library_dir)
+      crypto && { include_directory: include_dir, library_directory: library_dir, crypto_library: crypto }
+    end
+
+    def from_prefix(prefix)
+      root = prefix.to_s.strip
+      return if root.empty?
+
+      expanded = File.expand_path(root)
+      first_in(expanded)&.merge(prefix: expanded)
+    end
+
+    def first_in(prefix)
+      include_directory = File.join(prefix, 'include')
+      library_dirs(prefix).lazy.map { |directory| from_dirs(include_directory, directory) }.find(&:itself)
+    end
   end
 
-  competing.each do |path|
-    $INCFLAGS = strip_include_path($INCFLAGS, path)
-    $CPPFLAGS = strip_include_path($CPPFLAGS, path)
-    $CFLAGS = strip_include_path($CFLAGS, path)
-    puts "Ignoring competing OpenSSL headers: #{path}"
+  module OpenSSLDiscovery
+    HOMEBREW_PREFIXES = %w[
+      /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3
+      /opt/homebrew/opt/openssl /usr/local/opt/openssl
+    ].freeze
+    SYSTEM_PREFIXES = %w[/usr/local /usr].freeze
+
+    module_function
+
+    def call
+      explicit_prefix || explicit_dirs || homebrew || pkg_config || system_prefix
+    end
+
+    def explicit_prefix
+      root = BuildHost.argument('with-openssl-dir') || ENV.fetch('OPENSSL_ROOT_DIR',
+                                                                 nil) || ENV.fetch('OPENSSL_DIR', nil)
+      return if root.to_s.strip.empty?
+
+      found = OpenSSLInstallation.from_prefix(root) || abort(<<~MSG)
+        #{root.inspect} does not point to a complete OpenSSL 3 installation.
+
+        Expected OpenSSL 3 headers below <prefix>/include/openssl and libcrypto
+        below <prefix>/lib, <prefix>/lib64, or a Linux multiarch lib directory.
+      MSG
+      found.merge(source: 'explicit prefix')
+    end
+
+    def explicit_dirs
+      directories = %w[with-openssl-include with-openssl-lib].map { |name| BuildHost.argument(name) }
+      explicit_pair(directories).merge(source: 'explicit include/lib') if directories.any?
+    end
+
+    def explicit_pair(directories)
+      abort 'Both --with-openssl-include and --with-openssl-lib are required together' unless directories.all?
+
+      OpenSSLInstallation.from_dirs(*directories) ||
+        abort('Explicit OpenSSL include/lib paths do not contain a matching OpenSSL 3 headers + libcrypto pair')
+    end
+
+    def homebrew
+      return unless BuildHost.darwin?
+
+      prefixes = (brew_prefixes + HOMEBREW_PREFIXES).map(&:strip).reject(&:empty?).uniq
+      first_prefix(prefixes, 'prefix')
+    end
+
+    def brew_prefixes
+      return [] unless find_executable('brew')
+
+      %w[openssl@3 openssl].map { |formula| BuildHost.command_output('brew', '--prefix', formula) }
+    end
+
+    def pkg_config
+      version = pkg_config_version
+      return unless version
+
+      directories = %w[includedir libdir].map do |name|
+        BuildHost.command_output('pkg-config', "--variable=#{name}", 'openssl')
+      end
+      OpenSSLInstallation.from_dirs(*directories)&.merge(source: "pkg-config #{version}")
+    end
+
+    def pkg_config_version
+      return unless find_executable('pkg-config')
+
+      version = BuildHost.command_output('pkg-config', '--modversion', 'openssl')
+      version if version.split('.').first.to_i >= 3
+    end
+
+    def system_prefix
+      first_prefix(SYSTEM_PREFIXES, 'system prefix')
+    end
+
+    def first_prefix(prefixes, source)
+      found = prefixes.lazy.map { |prefix| OpenSSLInstallation.from_prefix(prefix) }.find(&:itself)
+      found&.merge(source: source)
+    end
+  end
+
+  module IncludeFlags
+    SEPARATE_FLAGS = %w[-I -isystem].freeze
+    ATTACHED_FLAG = /\A-(?:isystem|I)(.+)\z/.freeze
+
+    module_function
+
+    def paths(flags)
+      tokens = Shellwords.split(flags.to_s)
+      [nil, *tokens].each_cons(2).filter_map { |previous, token| path_for(previous, token) }
+    rescue ArgumentError
+      []
+    end
+
+    def path_for(previous, token)
+      SEPARATE_FLAGS.include?(previous) ? token : token[ATTACHED_FLAG, 1]
+    end
+
+    def strip(flags, path)
+      flags.to_s.gsub(/(?:\A|\s)-(?:I|isystem)\s*#{Regexp.escape(path)}(?=\s|\z)/, ' ').strip
+    end
+  end
+
+  module OpenSSLFlags
+    REPORT_LABELS = {
+      source: 'source', prefix: 'prefix', include_directory: 'include dir',
+      library_directory: 'library dir', crypto_library: 'libcrypto'
+    }.freeze
+
+    module_function
+
+    def apply(installation)
+      include_directory = installation.fetch(:include_directory)
+      pin_dir_config(include_directory, installation.fetch(:library_directory))
+      remove_competing_headers(include_directory)
+      prepend_include(shadow_include(include_directory))
+      link(installation.fetch(:library_directory), installation.fetch(:crypto_library))
+      report(installation)
+    end
+
+    def pin_dir_config(include_directory, library_directory)
+      $config_dirs['openssl'] = [include_directory, library_directory]
+    end
+
+    def remove_competing_headers(selected_directory)
+      selected = normalize(selected_directory)
+      competing_paths(selected).each { |path| strip_everywhere(path) }
+    end
+
+    def competing_paths(selected)
+      paths = [$INCFLAGS, $CPPFLAGS, $CFLAGS].flat_map { |flags| IncludeFlags.paths(flags) }.uniq
+      paths.select { |path| competing?(path, selected) }
+    end
+
+    def competing?(path, selected)
+      File.file?(File.join(path, 'openssl', 'opensslv.h')) && normalize(path) != selected
+    end
+
+    def strip_everywhere(path)
+      $INCFLAGS = IncludeFlags.strip($INCFLAGS, path)
+      $CPPFLAGS = IncludeFlags.strip($CPPFLAGS, path)
+      $CFLAGS = IncludeFlags.strip($CFLAGS, path)
+      puts "Ignoring competing OpenSSL headers: #{path}"
+    end
+
+    def shadow_include(selected_directory)
+      return selected_directory if BuildHost.windows?
+
+      shadow = File.expand_path('openssl-include')
+      target = File.join(shadow, 'openssl')
+      FileUtils.rm_rf(target)
+      FileUtils.mkdir_p(target)
+      header_files(selected_directory).each { |header| File.symlink(header, File.join(target, File.basename(header))) }
+      shadow
+    rescue SystemCallError, NotImplementedError
+      selected_directory
+    end
+
+    def header_files(selected_directory)
+      directories = [File.join(selected_directory, 'openssl'), *Dir.glob(File.join(selected_directory, '*-*-*', 'openssl'))]
+      directories.flat_map { |directory| Dir.glob(File.join(directory, '*.h')).sort }.uniq { |header| File.basename(header) }
+    end
+
+    def prepend_include(directory)
+      flag = "-I#{Shellwords.escape(directory)}"
+      $INCFLAGS = "#{flag} #{$INCFLAGS}".strip
+      $CPPFLAGS = "#{flag} #{$CPPFLAGS}".strip
+    end
+
+    def link(library_directory, crypto_library)
+      $LIBPATH.unshift(library_directory) unless $LIBPATH.include?(library_directory)
+      $LOCAL_LIBS = "#{Shellwords.escape(crypto_library)} #{$LOCAL_LIBS}".strip
+      return if BuildHost.windows? || library_directory.start_with?('/usr/lib')
+
+      $LDFLAGS = "-Wl,-rpath,#{Shellwords.escape(library_directory)} #{$LDFLAGS}".strip
+    end
+
+    def report(installation)
+      REPORT_LABELS.each do |key, label|
+        puts "OpenSSL #{label}: #{installation[key]}" if installation.key?(key)
+      end
+    end
+
+    def normalize(path)
+      File.realpath(path)
+    rescue Errno::ENOENT
+      File.expand_path(path)
+    end
+  end
+
+  module ExtensionBuild
+    HEADERS = %w[
+      openssl/evp.h openssl/rand.h openssl/crypto.h openssl/opensslv.h
+      openssl/core_names.h openssl/params.h
+    ].freeze
+    OWN_SOURCES = %w[pq_crypto_seal.c pqs_core.c aegis_unused_stubs.c].freeze
+    VENDOR_REQUIRED = %w[aegis256/aegis256.c common/common.c include/aegis.h].freeze
+    VENDOR_PATTERNS = %w[aegis256/*.c common/*.c].freeze
+    SANITIZER_LIST = /\A[a-z]+(?:,[a-z]+)*\z/.freeze
+
+    module_function
+
+    def configure
+      require_files(OWN_SOURCES + %w[pqs_core.h], __dir__)
+      configure_sources
+      configure_openssl
+      require_ruby_api
+      configure_compiler
+    end
+
+    def configure_openssl
+      installation = OpenSSLDiscovery.call
+      installation ? OpenSSLFlags.apply(installation) : use_default_libcrypto
+      require_headers
+      check_header_major(installation) if installation
+      abort 'OpenSSL 3 libcrypto is required' unless have_func('EVP_MAC_fetch', 'openssl/evp.h')
+    end
+
+    OPENSSL3_PROBE = <<~SRC
+      #include <openssl/opensslv.h>
+      #if !defined(OPENSSL_VERSION_MAJOR) || OPENSSL_VERSION_MAJOR < 3
+      #error OpenSSL 3 headers required
+      #endif
+    SRC
+
+    def require_headers
+      abort 'OpenSSL 3.0 or newer headers are required' unless checking_for('OpenSSL 3 headers') { try_cpp(OPENSSL3_PROBE) }
+
+      HEADERS.each { |header| abort "#{header} is required" unless have_header(header) }
+    end
+
+    def use_default_libcrypto
+      puts 'OpenSSL 3 prefix: none resolved; using compiler defaults'
+      abort 'OpenSSL libcrypto is required' unless have_library('crypto')
+    end
+
+    def check_header_major(installation)
+      major = OpenSSLInstallation.header_major(installation.fetch(:include_directory)).to_i
+      abort 'OpenSSL 3.0 or newer headers are required' if major < 3
+
+      puts "OpenSSL header major: #{major}"
+    end
+
+    def require_ruby_api
+      abort 'rb_thread_call_without_gvl is required' unless have_func('rb_thread_call_without_gvl', 'ruby/thread.h')
+
+      have_func('rb_nogvl', 'ruby/thread.h')
+    end
+
+    def configure_compiler
+      $CFLAGS << ' -std=c11 -O3 -Wall -Wextra -fstack-protector-strong'
+      sanitizers = sanitizer_list
+      return enable_sanitizers(sanitizers) unless sanitizers.empty?
+
+      $CFLAGS << ' -D_FORTIFY_SOURCE=2' unless macro_defined?('_FORTIFY_SOURCE', '#include <stddef.h>')
+    end
+
+    def sanitizer_list
+      value = ENV.fetch('PQC_SEAL_SANITIZE', '').strip
+      value = 'address,undefined' if value == '1'
+      return value if value.empty? || value.match?(SANITIZER_LIST)
+
+      abort 'PQC_SEAL_SANITIZE must be 1 or a comma-separated sanitizer list'
+    end
+
+    def enable_sanitizers(sanitizers)
+      $CFLAGS << " -O1 -g -fno-omit-frame-pointer -fsanitize=#{sanitizers}"
+      $LDFLAGS << " -fsanitize=#{sanitizers}"
+    end
+
+    def configure_sources
+      sources = vendor_sources
+      $INCFLAGS << ' -I$(srcdir)/vendor/libaegis/src/include'
+      add_source_directories(sources)
+      $srcs = OWN_SOURCES + sources.map { |source| File.basename(source) }
+    end
+
+    def add_source_directories(sources)
+      sources.map { |source| File.dirname(source) }.uniq.each { |directory| add_source_directory(directory) }
+    end
+
+    def vendor_sources
+      vendor = Pathname(__dir__).join('vendor/libaegis/src')
+      abort 'vendored libaegis sources are missing' unless vendor.directory?
+
+      require_files(VENDOR_REQUIRED, vendor)
+      VENDOR_PATTERNS.flat_map { |pattern| Dir[vendor.join(pattern).to_s] }.sort
+    end
+
+    def require_files(files, directory)
+      missing = files.reject { |file| File.file?(File.join(directory, file)) }
+      abort "missing native sources under #{directory}: #{missing.join(', ')}" unless missing.empty?
+    end
+
+    def add_source_directory(directory)
+      relative = Pathname(directory).relative_path_from(Pathname(__dir__))
+      $VPATH << "$(srcdir)/#{relative}"
+      $INCFLAGS << " -I$(srcdir)/#{relative}"
+    end
   end
 end
 
-def configure_selected_openssl!(installation)
-  include_directory = installation.fetch(:include_directory)
-  library_directory = installation.fetch(:library_directory)
-  crypto_library = installation.fetch(:crypto_library)
-
-  remove_competing_openssl_headers!(include_directory)
-
-  # Do not call dir_config("openssl") here. On Ruby 2.7 it can reuse the
-  # --with-openssl-dir value from Ruby's own build and reintroduce OpenSSL 1.1.
-  $INCFLAGS = "-I#{Shellwords.escape(include_directory)} #{$INCFLAGS}".strip
-  $CPPFLAGS = "-I#{Shellwords.escape(include_directory)} #{$CPPFLAGS}".strip
-  $LIBPATH.unshift(library_directory) unless $LIBPATH.include?(library_directory)
-  $LOCAL_LIBS = "#{Shellwords.escape(crypto_library)} #{$LOCAL_LIBS}".strip
-
-  unless windows_host? || library_directory.start_with?("/usr/lib")
-    $LDFLAGS = "-Wl,-rpath,#{Shellwords.escape(library_directory)} #{$LDFLAGS}".strip
-  end
-
-  puts "OpenSSL source: #{installation.fetch(:source)}"
-  puts "OpenSSL prefix: #{installation[:prefix]}" if installation[:prefix]
-  puts "OpenSSL include dir: #{include_directory}"
-  puts "OpenSSL library dir: #{library_directory}"
-  puts "OpenSSL libcrypto: #{crypto_library}"
-end
-
-selected_openssl = discover_openssl3_installation
-if selected_openssl
-  configure_selected_openssl!(selected_openssl)
-else
-  puts "OpenSSL 3 prefix: none resolved; using compiler defaults"
-  abort "OpenSSL libcrypto is required" unless have_library("crypto")
-end
-
-%w[openssl/evp.h openssl/hmac.h openssl/rand.h openssl/crypto.h openssl/opensslv.h].each do |header|
-  abort "#{header} is required" unless have_header(header)
-end
-
-if selected_openssl
-  header_major = openssl_header_major(selected_openssl.fetch(:include_directory))
-  abort "OpenSSL 3.0 or newer headers are required" unless header_major && header_major >= 3
-  puts "OpenSSL header major: #{header_major}"
-end
-
-abort "rb_thread_call_without_gvl is required" unless have_func("rb_thread_call_without_gvl", "ruby/thread.h")
-
-$CFLAGS << " -std=c11 -O3 -Wall -Wextra"
-if ENV["PQC_SEAL_SANITIZE"] == "1"
-  $CFLAGS << " -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined"
-  $LDFLAGS << " -fsanitize=address,undefined"
-end
-
-vendor = Pathname(__dir__).join("vendor/libaegis/src")
-patterns = %w[
-  aegis256/*.c common/*.c
-]
-sources = patterns.flat_map { |pattern| Dir[vendor.join(pattern).to_s] }.sort
-abort "vendored libaegis sources are missing" if sources.empty?
-
-$INCFLAGS << " -I$(srcdir)/vendor/libaegis/src/include"
-source_dirs = sources.map { |source| File.dirname(source) }.uniq
-source_dirs.each do |directory|
-  relative = Pathname(directory).relative_path_from(Pathname(__dir__))
-  $VPATH << "$(srcdir)/#{relative}"
-  $INCFLAGS << " -I$(srcdir)/#{relative}"
-end
-$srcs = ["pq_crypto_seal.c", "aegis_unused_stubs.c"] + sources.map { |source| File.basename(source) }
-
-create_makefile(extension_name)
+PQCSealBuild::ExtensionBuild.configure
+create_makefile('pq_crypto/seal/pq_crypto_seal')
